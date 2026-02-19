@@ -1,0 +1,28 @@
+{
+  "name": "claude-alwaysrunning",
+  "version": "1.0.0",
+  "description": "Run Claude Code as a persistent background service with auto-restart",
+  "main": "src/index.js",
+  "bin": {
+    "claude-always": "./bin/claude-always.js"
+  },
+  "scripts": {
+    "start": "node bin/claude-always.js start"
+  },
+  "keywords": [
+    "claude",
+    "cli",
+    "service",
+    "daemon",
+    "always-on"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.1.0",
+    "node-pty": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
