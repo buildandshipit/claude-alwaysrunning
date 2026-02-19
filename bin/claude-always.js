@@ -184,7 +184,7 @@ program
   .command('send')
   .description('Send a command to Claude and show response')
   .argument('<command>', 'Command to send')
-  .option('-w, --wait <seconds>', 'Max wait time in seconds (default: 5, use 0 to not wait)')
+  .option('-w, --wait <seconds>', 'Max wait time in seconds (default: 30, use 0 to not wait)')
   .option('-p, --port <port>', 'Service port')
   .action(async (command, options) => {
     await sendCommand(command, options);

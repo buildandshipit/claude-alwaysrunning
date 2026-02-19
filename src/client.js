@@ -237,7 +237,7 @@ async function runInteractive(options = {}) {
  */
 async function sendCommand(command, options = {}) {
   const client = new ClaudeClient(options);
-  const waitTime = options.wait ? parseInt(options.wait) * 1000 : 5000; // Default 5s
+  const waitTime = options.wait ? parseInt(options.wait) * 1000 : 30000; // Default 30s
   const noWait = options.wait === '0' || options.wait === 0;
 
   try {
