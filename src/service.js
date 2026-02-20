@@ -133,12 +133,19 @@ class ClaudeService {
     this.readyCheckInterval = setInterval(() => {
       const silenceTime = Date.now() - this.lastOutputTime;
 
-      // Claude is ready after 2 seconds of silence (welcome screen done)
-      if (silenceTime > 2000 && !this.claudeReady) {
+      // Claude is ready after 4 seconds of silence (welcome screen done)
+      if (silenceTime > 4000 && !this.claudeReady) {
         this.claudeReady = true;
         clearInterval(this.readyCheckInterval);
         this.readyCheckInterval = null;
         this.log('Claude is ready (startup complete)');
+
+        // Send a "wake up" Enter to prime Claude for input
+        // This fixes an issue where the first command after start is ignored
+        if (this.ptyProcess) {
+          this.ptyProcess.write('\r');
+          this.log('Sent wake-up Enter');
+        }
 
         // Process any queued commands
         this.processCommandQueue();
@@ -338,11 +345,17 @@ class ClaudeService {
   executeCommand(clientId, msg) {
     if (this.ptyProcess) {
       this.log(`Client ${clientId}: ${msg.data.substring(0, 50)}...`);
-      this.ptyProcess.write(msg.data);
-      if (!msg.data.endsWith('\r') && !msg.data.endsWith('\n')) {
-        // Send Enter key (carriage return)
-        this.ptyProcess.write('\r');
-      }
+      this.log(`PTY pid=${this.ptyProcess.pid}, writing command...`);
+      // Send command first
+      const written = this.ptyProcess.write(msg.data);
+      this.log(`Command written: ${written}`);
+      // Delay then send Enter - Claude Code needs time to process input
+      setTimeout(() => {
+        if (this.ptyProcess && !this.isShuttingDown) {
+          const enterWritten = this.ptyProcess.write('\r');
+          this.log(`Sent Enter for client ${clientId}: ${enterWritten}`);
+        }
+      }, 200);
     } else {
       this.sendTo(clientId, { type: 'error', message: 'Claude not running' });
     }

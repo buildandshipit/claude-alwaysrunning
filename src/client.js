@@ -275,7 +275,11 @@ async function sendCommand(command, options = {}) {
     // Wait for response:
     // - Wait indefinitely for FIRST output (after command sent)
     // - Once output starts, disconnect after silence period
+    let checkCount = 0;
+    const startTime = Date.now();
     const checkInterval = setInterval(() => {
+      checkCount++;
+      const elapsed = Date.now() - startTime;
       // Only check silence if we've received output after command was sent
       if (outputReceived && lastOutputTime) {
         const silenceTime = Date.now() - lastOutputTime;
@@ -288,7 +292,6 @@ async function sendCommand(command, options = {}) {
           process.exit(0);
         }
       }
-      // If no output yet, keep waiting (no timeout)
     }, 500);
 
     // Safety max timeout to prevent zombie processes
