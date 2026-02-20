@@ -189,6 +189,7 @@ program
   .action(async (command, options) => {
     try {
       await sendCommand(command, options);
+      process.exit(0);
     } catch (err) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
