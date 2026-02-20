@@ -71,11 +71,9 @@ class WhatsAppBridge {
       console.log('');
     });
 
-    // Message handler - use message_create to catch own messages in solo group
+    // Message handler - message_create catches all messages including own
     this.client.on('message_create', async (message) => {
-      if (message.fromMe) {
-        await this.handleMessage(message);
-      }
+      await this.handleMessage(message);
     });
 
     // Disconnected handler
@@ -104,8 +102,13 @@ class WhatsAppBridge {
   async handleMessage(message) {
     const chat = await message.getChat();
 
-    // Skip messages we sent (bot responses)
+    // Skip messages we sent (bot responses) - check both tracked IDs and fromMe while processing
     if (this.sentMessages.has(message.id._serialized)) {
+      return;
+    }
+
+    // Skip own messages while we're processing (prevents loops)
+    if (message.fromMe && this.processing) {
       return;
     }
 
