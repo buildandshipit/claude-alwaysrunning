@@ -39,6 +39,7 @@ class ClaudeService {
     this.lastOutputTime = 0;
     this.commandQueue = [];
     this.readyCheckInterval = null;
+    this.permissionsAccepted = false;
 
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
@@ -85,13 +86,16 @@ class ClaudeService {
       try {
         const isWindows = os.platform() === 'win32';
         const shell = isWindows ? 'cmd.exe' : process.env.SHELL || '/bin/bash';
-        const shellArgs = isWindows ? ['/c', 'claude'] : ['-c', 'claude'];
+        // Use --dangerously-skip-permissions to avoid the confirmation dialog in daemon mode
+        const claudeCmd = 'claude --dangerously-skip-permissions';
+        const shellArgs = isWindows ? ['/c', claudeCmd] : ['-c', claudeCmd];
 
         this.log('Starting Claude process...');
 
         // Reset ready state
         this.claudeReady = false;
         this.lastOutputTime = Date.now();
+        this.permissionsAccepted = false;
         this.startReadyCheck();
 
         this.ptyProcess = pty.spawn(shell, shellArgs, {
@@ -139,13 +143,6 @@ class ClaudeService {
         clearInterval(this.readyCheckInterval);
         this.readyCheckInterval = null;
         this.log('Claude is ready (startup complete)');
-
-        // Send a "wake up" Enter to prime Claude for input
-        // This fixes an issue where the first command after start is ignored
-        if (this.ptyProcess) {
-          this.ptyProcess.write('\r');
-          this.log('Sent wake-up Enter');
-        }
 
         // Process any queued commands
         this.processCommandQueue();
@@ -203,6 +200,25 @@ class ClaudeService {
   handleOutput(data) {
     // Track last output time for ready detection
     this.lastOutputTime = Date.now();
+
+    // Auto-accept permissions dialog if detected
+    // Look for "Yes, I accept" which indicates the bypass permissions warning
+    if (!this.permissionsAccepted && data.includes('Yes, I accept')) {
+      this.log('Detected permissions dialog, auto-accepting...');
+      this.permissionsAccepted = true;
+      // Send "2" to select option 2, then Enter to confirm
+      setTimeout(() => {
+        if (this.ptyProcess && !this.isShuttingDown) {
+          this.ptyProcess.write('2');
+          setTimeout(() => {
+            if (this.ptyProcess && !this.isShuttingDown) {
+              this.ptyProcess.write('\r');
+              this.log('Sent auto-accept sequence for permissions dialog');
+            }
+          }, 100);
+        }
+      }, 100);
+    }
 
     // Buffer output
     this.outputBuffer.push({ time: Date.now(), data });
