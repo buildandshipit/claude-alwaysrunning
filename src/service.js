@@ -34,6 +34,12 @@ class ClaudeService {
     this.lastRestartTime = 0;
     this.isShuttingDown = false;
 
+    // Claude ready state (wait for startup to complete)
+    this.claudeReady = false;
+    this.lastOutputTime = 0;
+    this.commandQueue = [];
+    this.readyCheckInterval = null;
+
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
     this.portFile = path.join(this.configDir, 'service.port');
@@ -83,6 +89,11 @@ class ClaudeService {
 
         this.log('Starting Claude process...');
 
+        // Reset ready state
+        this.claudeReady = false;
+        this.lastOutputTime = Date.now();
+        this.startReadyCheck();
+
         this.ptyProcess = pty.spawn(shell, shellArgs, {
           name: 'xterm-256color',
           cols: 120,
@@ -107,6 +118,43 @@ class ClaudeService {
         reject(err);
       }
     });
+  }
+
+  /**
+   * Start checking if Claude is ready (startup complete)
+   */
+  startReadyCheck() {
+    // Clear any existing interval
+    if (this.readyCheckInterval) {
+      clearInterval(this.readyCheckInterval);
+    }
+
+    // Check every 500ms if output has settled
+    this.readyCheckInterval = setInterval(() => {
+      const silenceTime = Date.now() - this.lastOutputTime;
+
+      // Claude is ready after 2 seconds of silence (welcome screen done)
+      if (silenceTime > 2000 && !this.claudeReady) {
+        this.claudeReady = true;
+        clearInterval(this.readyCheckInterval);
+        this.readyCheckInterval = null;
+        this.log('Claude is ready (startup complete)');
+
+        // Process any queued commands
+        this.processCommandQueue();
+      }
+    }, 500);
+  }
+
+  /**
+   * Process queued commands after Claude is ready
+   */
+  processCommandQueue() {
+    while (this.commandQueue.length > 0) {
+      const { clientId, msg } = this.commandQueue.shift();
+      this.log(`Processing queued command from client ${clientId}`);
+      this.executeCommand(clientId, msg);
+    }
   }
 
   /**
@@ -146,6 +194,9 @@ class ClaudeService {
    * Handle output from Claude
    */
   handleOutput(data) {
+    // Track last output time for ready detection
+    this.lastOutputTime = Date.now();
+
     // Buffer output
     this.outputBuffer.push({ time: Date.now(), data });
     while (this.outputBuffer.length > this.maxBufferSize) {
@@ -237,15 +288,13 @@ class ClaudeService {
         break;
 
       case 'command':
-        // Complete command - add newline if needed (for send mode)
-        if (this.ptyProcess) {
-          this.log(`Client ${clientId}: ${msg.data.substring(0, 50)}...`);
-          this.ptyProcess.write(msg.data);
-          if (!msg.data.endsWith('\r') && !msg.data.endsWith('\n')) {
-            this.ptyProcess.write('\r');
-          }
+        // Queue command if Claude isn't ready yet (still starting up)
+        if (!this.claudeReady) {
+          this.log(`Claude not ready, queuing command from client ${clientId}`);
+          this.sendTo(clientId, { type: 'status', message: 'Waiting for Claude to be ready...' });
+          this.commandQueue.push({ clientId, msg });
         } else {
-          this.sendTo(clientId, { type: 'error', message: 'Claude not running' });
+          this.executeCommand(clientId, msg);
         }
         break;
 
@@ -253,10 +302,12 @@ class ClaudeService {
         this.sendTo(clientId, {
           type: 'status',
           running: !!this.ptyProcess,
+          ready: this.claudeReady,
           pid: process.pid,
           port: this.port,
           clients: this.clients.size,
-          restarts: this.restartAttempts
+          restarts: this.restartAttempts,
+          queuedCommands: this.commandQueue.length
         });
         break;
 
@@ -278,6 +329,22 @@ class ClaudeService {
       case 'ping':
         this.sendTo(clientId, { type: 'pong' });
         break;
+    }
+  }
+
+  /**
+   * Execute a command (after Claude is ready)
+   */
+  executeCommand(clientId, msg) {
+    if (this.ptyProcess) {
+      this.log(`Client ${clientId}: ${msg.data.substring(0, 50)}...`);
+      this.ptyProcess.write(msg.data);
+      if (!msg.data.endsWith('\r') && !msg.data.endsWith('\n')) {
+        // Send Enter key (carriage return)
+        this.ptyProcess.write('\r');
+      }
+    } else {
+      this.sendTo(clientId, { type: 'error', message: 'Claude not running' });
     }
   }
 
@@ -307,6 +374,12 @@ class ClaudeService {
   async stop() {
     this.log('Stopping service...');
     this.isShuttingDown = true;
+
+    // Clear ready check interval
+    if (this.readyCheckInterval) {
+      clearInterval(this.readyCheckInterval);
+      this.readyCheckInterval = null;
+    }
 
     this.broadcast({ type: 'shutdown' });
 

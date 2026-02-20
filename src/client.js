@@ -237,24 +237,33 @@ async function runInteractive(options = {}) {
  */
 async function sendCommand(command, options = {}) {
   const client = new ClaudeClient(options);
-  const waitTime = options.wait ? parseInt(options.wait) * 1000 : 30000; // Default 30s
+  const silenceTimeout = options.silence ? parseInt(options.silence) * 1000 : 3000; // 3s silence = done
+  const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000; // 5 min safety max
   const noWait = options.wait === '0' || options.wait === 0;
 
   try {
     await client.connect();
 
-    let lastOutputTime = Date.now();
+    let lastOutputTime = null;
     let outputReceived = false;
+    let commandSent = false;
+    let commandSentTime = null;
 
-    // Always show output
+    // Output handler - track output after minimal grace period (skip command echo)
     client.outputHandler = (data) => {
       process.stdout.write(data);
-      lastOutputTime = Date.now();
-      outputReceived = true;
+
+      // Only track timing after command is sent + 100ms grace (skip immediate echo)
+      if (commandSent && Date.now() - commandSentTime > 100) {
+        lastOutputTime = Date.now();
+        outputReceived = true;
+      }
     };
 
     // Send the command
     client.sendCommand(command);
+    commandSent = true;
+    commandSentTime = Date.now();
 
     if (noWait) {
       // Just send and exit
@@ -263,26 +272,32 @@ async function sendCommand(command, options = {}) {
       return;
     }
 
-    // Wait for response, exit when output stops for 2 seconds
+    // Wait for response:
+    // - Wait indefinitely for FIRST output (after command sent)
+    // - Once output starts, disconnect after silence period
     const checkInterval = setInterval(() => {
-      const silenceTime = Date.now() - lastOutputTime;
+      // Only check silence if we've received output after command was sent
+      if (outputReceived && lastOutputTime) {
+        const silenceTime = Date.now() - lastOutputTime;
 
-      // If we got output and it's been quiet for 2s, we're done
-      if (outputReceived && silenceTime > 2000) {
-        clearInterval(checkInterval);
-        console.log(''); // New line at end
-        client.disconnect();
-        process.exit(0);
+        // If output started and it's been quiet, we're done
+        if (silenceTime > silenceTimeout) {
+          clearInterval(checkInterval);
+          console.log(''); // New line at end
+          client.disconnect();
+          process.exit(0);
+        }
       }
+      // If no output yet, keep waiting (no timeout)
     }, 500);
 
-    // Max wait time as fallback
+    // Safety max timeout to prevent zombie processes
     setTimeout(() => {
       clearInterval(checkInterval);
-      console.log(''); // New line at end
+      console.log('\n[Max timeout reached]');
       client.disconnect();
       process.exit(0);
-    }, waitTime);
+    }, maxTimeout);
 
     // Keep process alive
     await new Promise(() => {});
