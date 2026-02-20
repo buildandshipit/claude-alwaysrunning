@@ -182,14 +182,17 @@ program
 
 program
   .command('send')
-  .description('Send a command to Claude and show response')
+  .description('Send a command to Claude (uses claude --print for clean output)')
   .argument('<command>', 'Command to send')
-  .option('-s, --silence <seconds>', 'Disconnect after N seconds of silence (default: 3)')
-  .option('-m, --max <seconds>', 'Safety max timeout in seconds (default: 300)')
-  .option('-w, --wait <value>', 'Use 0 to send without waiting for response')
-  .option('-p, --port <port>', 'Service port')
+  .option('-m, --max <seconds>', 'Max timeout in seconds (default: 300)')
+  .option('-j, --json', 'Output in JSON format')
   .action(async (command, options) => {
-    await sendCommand(command, options);
+    try {
+      await sendCommand(command, options);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 program.parse();

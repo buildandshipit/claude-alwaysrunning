@@ -11,6 +11,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 const { DEFAULT_PORT } = require('./service');
 
 class ClaudeClient {
@@ -233,83 +234,57 @@ async function runInteractive(options = {}) {
 }
 
 /**
- * Send single command
+ * Send single command using claude --print for clean output
  */
 async function sendCommand(command, options = {}) {
-  const client = new ClaudeClient(options);
-  const silenceTimeout = options.silence ? parseInt(options.silence) * 1000 : 3000; // 3s silence = done
-  const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000; // 5 min safety max
-  const noWait = options.wait === '0' || options.wait === 0;
+  const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000; // 5 min max
+  const outputFormat = options.json ? 'json' : 'text';
 
-  try {
-    await client.connect();
+  return new Promise((resolve, reject) => {
+    // Escape the command for shell - wrap in quotes and escape internal quotes
+    const escapedCommand = command.replace(/"/g, '\\"');
+    const fullCommand = `claude --print --dangerously-skip-permissions --output-format ${outputFormat} "${escapedCommand}"`;
 
-    let lastOutputTime = null;
-    let outputReceived = false;
-    let commandSent = false;
-    let commandSentTime = null;
+    const claude = spawn(fullCommand, [], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: true
+    });
 
-    // Output handler - track output after minimal grace period (skip command echo)
-    client.outputHandler = (data) => {
-      process.stdout.write(data);
+    let stdout = '';
+    let stderr = '';
 
-      // Only track timing after command is sent + 100ms grace (skip immediate echo)
-      if (commandSent && Date.now() - commandSentTime > 100) {
-        lastOutputTime = Date.now();
-        outputReceived = true;
+    claude.stdout.on('data', (data) => {
+      const text = data.toString();
+      stdout += text;
+      process.stdout.write(text);
+    });
+
+    claude.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    claude.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        console.error(stderr);
+        reject(new Error(`Claude exited with code ${code}`));
       }
-    };
+    });
 
-    // Send the command
-    client.sendCommand(command);
-    commandSent = true;
-    commandSentTime = Date.now();
+    claude.on('error', (err) => {
+      reject(err);
+    });
 
-    if (noWait) {
-      // Just send and exit
-      await new Promise(r => setTimeout(r, 100));
-      client.disconnect();
-      return;
-    }
-
-    // Wait for response:
-    // - Wait indefinitely for FIRST output (after command sent)
-    // - Once output starts, disconnect after silence period
-    let checkCount = 0;
-    const startTime = Date.now();
-    const checkInterval = setInterval(() => {
-      checkCount++;
-      const elapsed = Date.now() - startTime;
-      // Only check silence if we've received output after command was sent
-      if (outputReceived && lastOutputTime) {
-        const silenceTime = Date.now() - lastOutputTime;
-
-        // If output started and it's been quiet, we're done
-        if (silenceTime > silenceTimeout) {
-          clearInterval(checkInterval);
-          console.log(''); // New line at end
-          client.disconnect();
-          process.exit(0);
-        }
-      }
-    }, 500);
-
-    // Safety max timeout to prevent zombie processes
+    // Safety timeout
     setTimeout(() => {
-      clearInterval(checkInterval);
+      claude.kill();
       console.log('\n[Max timeout reached]');
-      client.disconnect();
-      process.exit(0);
+      resolve({ stdout, stderr, timeout: true });
     }, maxTimeout);
-
-    // Keep process alive
-    await new Promise(() => {});
-
-  } catch (err) {
-    console.error(`Error: ${err.message}`);
-    console.log('Start the service with: claude-always start');
-    process.exit(1);
-  }
+  });
 }
 
 /**
