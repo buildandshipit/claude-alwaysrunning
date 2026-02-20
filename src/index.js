@@ -4,6 +4,7 @@
 
 const { ClaudeService, getServiceStatus, stopService, DEFAULT_PORT } = require('./service');
 const { ClaudeClient, runInteractive, sendCommand, showStatus } = require('./client');
+const { WhatsAppBridge, runWhatsAppBridge } = require('./whatsapp-bridge');
 
 module.exports = {
   ClaudeService,
@@ -13,5 +14,7 @@ module.exports = {
   ClaudeClient,
   runInteractive,
   sendCommand,
-  showStatus
+  showStatus,
+  WhatsAppBridge,
+  runWhatsAppBridge
 };

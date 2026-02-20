@@ -12,7 +12,8 @@ const {
   stopService,
   runInteractive,
   sendCommand,
-  showStatus
+  showStatus,
+  runWhatsAppBridge
 } = require('../src');
 
 program
@@ -194,6 +195,21 @@ program
       console.error(`Error: ${err.message}`);
       process.exit(1);
     }
+  });
+
+// ============================================================================
+// WhatsApp Bridge
+// ============================================================================
+
+program
+  .command('whatsapp')
+  .description('Start WhatsApp bridge (messages in group go to Claude)')
+  .option('-g, --group <name>', 'Group name to listen to (default: claudebot)')
+  .option('-m, --max <seconds>', 'Max timeout per message in seconds (default: 300)')
+  .action(async (options) => {
+    const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000;
+    const groupName = options.group || 'claudebot';
+    await runWhatsAppBridge({ maxTimeout, groupName });
   });
 
 program.parse();
