@@ -21,6 +21,7 @@ class WhatsAppBridge {
     this.myNumber = null;
     this.maxTimeout = options.maxTimeout || 300000; // 5 minutes
     this.groupName = options.groupName || 'claudebot'; // Target group name
+    this.sentMessages = new Set(); // Track messages we've sent to avoid loops
   }
 
   /**
@@ -70,9 +71,11 @@ class WhatsAppBridge {
       console.log('');
     });
 
-    // Message handler
-    this.client.on('message', async (message) => {
-      await this.handleMessage(message);
+    // Message handler - use message_create to catch own messages in solo group
+    this.client.on('message_create', async (message) => {
+      if (message.fromMe) {
+        await this.handleMessage(message);
+      }
     });
 
     // Disconnected handler
@@ -86,6 +89,11 @@ class WhatsAppBridge {
       console.error('WhatsApp auth failed:', msg);
     });
 
+    // Catch any errors
+    this.client.on('error', (err) => {
+      console.error('[Error]', err);
+    });
+
     // Initialize
     await this.client.initialize();
   }
@@ -95,6 +103,11 @@ class WhatsAppBridge {
    */
   async handleMessage(message) {
     const chat = await message.getChat();
+
+    // Skip messages we sent (bot responses)
+    if (this.sentMessages.has(message.id._serialized)) {
+      return;
+    }
 
     // Only process messages from the target group
     if (!chat.isGroup || chat.name.toLowerCase() !== this.groupName.toLowerCase()) {
@@ -127,14 +140,16 @@ class WhatsAppBridge {
         const chunks = this.splitMessage(response, 4000);
 
         for (const chunk of chunks) {
-          await chat.sendMessage(chunk);
+          const sent = await chat.sendMessage(chunk);
+          this.sentMessages.add(sent.id._serialized);
         }
 
         console.log(`[Replied] ${response.substring(0, 50)}${response.length > 50 ? '...' : ''}`);
       }
     } catch (err) {
       console.error('[Error]', err.message);
-      await chat.sendMessage(`Error: ${err.message}`);
+      const errMsg = await chat.sendMessage(`Error: ${err.message}`);
+      this.sentMessages.add(errMsg.id._serialized);
     } finally {
       this.processing = false;
     }
