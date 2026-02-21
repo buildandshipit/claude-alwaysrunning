@@ -17,9 +17,11 @@ const { DEFAULT_PORT } = require('./service');
 class ClaudeClient {
   constructor(options = {}) {
     this.port = options.port || this.getServicePort() || DEFAULT_PORT;
-    this.host = '127.0.0.1';
+    this.host = options.host || '127.0.0.1';
+    this.apiKey = options.apiKey || null;
     this.socket = null;
     this.connected = false;
+    this.authenticated = false;
     this.buffer = '';
     this.outputHandler = null;
     this.pendingResolve = null;
@@ -55,13 +57,54 @@ class ClaudeClient {
       this.socket.on('connect', () => {
         clearTimeout(timeout);
         this.connected = true;
-        resolve();
+        // Don't resolve yet if we need to authenticate
       });
 
-      this.socket.on('data', (data) => this.handleData(data));
+      this.socket.on('data', (data) => {
+        this.buffer += data.toString();
+
+        let idx;
+        while ((idx = this.buffer.indexOf('\n')) !== -1) {
+          const msg = this.buffer.slice(0, idx);
+          this.buffer = this.buffer.slice(idx + 1);
+
+          try {
+            const parsed = JSON.parse(msg);
+
+            // Handle auth_required
+            if (parsed.type === 'auth_required') {
+              if (this.apiKey) {
+                this.send({ type: 'auth', key: this.apiKey });
+              } else {
+                reject(new Error('Authentication required. Provide apiKey option.'));
+                this.disconnect();
+                return;
+              }
+            }
+            // Handle auth_failed
+            else if (parsed.type === 'auth_failed') {
+              reject(new Error('Authentication failed: ' + parsed.message));
+              this.disconnect();
+              return;
+            }
+            // Handle connected (authenticated or local)
+            else if (parsed.type === 'connected') {
+              this.authenticated = true;
+              resolve();
+            }
+            // Handle other messages
+            else {
+              this.handleMessage(parsed);
+            }
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+      });
 
       this.socket.on('close', () => {
         this.connected = false;
+        this.authenticated = false;
         if (this.onDisconnect) this.onDisconnect();
       });
 
@@ -72,7 +115,7 @@ class ClaudeClient {
   }
 
   /**
-   * Handle incoming data
+   * Handle incoming data (used after connection is established)
    */
   handleData(data) {
     this.buffer += data.toString();
@@ -86,6 +129,15 @@ class ClaudeClient {
         this.handleMessage(JSON.parse(msg));
       } catch (e) {}
     }
+  }
+
+  /**
+   * Setup data handler after successful connection
+   */
+  setupDataHandler() {
+    // Replace the connect data handler with the regular one
+    this.socket.removeAllListeners('data');
+    this.socket.on('data', (data) => this.handleData(data));
   }
 
   /**
@@ -189,8 +241,10 @@ async function runInteractive(options = {}) {
   const client = new ClaudeClient(options);
 
   try {
-    console.log(`Connecting to Claude service on port ${client.port}...`);
+    const hostInfo = client.host !== '127.0.0.1' ? `${client.host}:${client.port}` : `port ${client.port}`;
+    console.log(`Connecting to Claude service on ${hostInfo}...`);
     await client.connect();
+    client.setupDataHandler();
     console.log('Connected! Press Ctrl+C to disconnect.\n');
 
     // Output handler

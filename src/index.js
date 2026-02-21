@@ -5,16 +5,33 @@
 const { ClaudeService, getServiceStatus, stopService, DEFAULT_PORT } = require('./service');
 const { ClaudeClient, runInteractive, sendCommand, showStatus } = require('./client');
 const { WhatsAppBridge, runWhatsAppBridge } = require('./whatsapp-bridge');
+const { VoiceBridge, runVoiceBridge } = require('./voice-bridge');
+const { APIKeyManager, getAPIKeyManager } = require('./auth');
+const providers = require('./providers');
 
 module.exports = {
+  // Service
   ClaudeService,
   getServiceStatus,
   stopService,
   DEFAULT_PORT,
+
+  // Client
   ClaudeClient,
   runInteractive,
   sendCommand,
   showStatus,
+
+  // Bridges
   WhatsAppBridge,
-  runWhatsAppBridge
+  runWhatsAppBridge,
+  VoiceBridge,
+  runVoiceBridge,
+
+  // Auth
+  APIKeyManager,
+  getAPIKeyManager,
+
+  // Providers
+  ...providers
 };

@@ -12,6 +12,7 @@ const pty = require('node-pty');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { getAPIKeyManager } = require('./auth');
 
 const DEFAULT_PORT = 3377;
 const RESTART_DELAY = 2000;
@@ -22,6 +23,7 @@ class ClaudeService {
   constructor(options = {}) {
     this.port = options.port || DEFAULT_PORT;
     this.configDir = path.join(os.homedir(), '.claude-alwaysrunning');
+    this.remoteMode = options.remote || false;
 
     // State
     this.ptyProcess = null;
@@ -40,6 +42,9 @@ class ClaudeService {
     this.commandQueue = [];
     this.readyCheckInterval = null;
     this.permissionsAccepted = false;
+
+    // Authentication
+    this.apiKeyManager = this.remoteMode ? getAPIKeyManager() : null;
 
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
@@ -239,19 +244,33 @@ class ClaudeService {
         this.handleClient(socket);
       });
 
+      // Bind to 0.0.0.0 in remote mode, 127.0.0.1 otherwise
+      const bindAddress = this.remoteMode ? '0.0.0.0' : '127.0.0.1';
+
       this.server.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {
           this.log(`Port ${this.port} in use, trying ${this.port + 1}`);
           this.port++;
-          this.server.listen(this.port, '127.0.0.1');
+          this.server.listen(this.port, bindAddress);
         } else {
           reject(err);
         }
       });
 
-      this.server.listen(this.port, '127.0.0.1', () => {
+      this.server.listen(this.port, bindAddress, () => {
         fs.writeFileSync(this.portFile, this.port.toString());
-        this.log(`TCP server listening on port ${this.port}`);
+        const modeStr = this.remoteMode ? ' (REMOTE MODE - auth required)' : '';
+        this.log(`TCP server listening on ${bindAddress}:${this.port}${modeStr}`);
+
+        if (this.remoteMode) {
+          const keyCount = this.apiKeyManager.count();
+          if (keyCount === 0) {
+            this.log('WARNING: No API keys configured. Run "claude-always keys add <name>" to create one.');
+          } else {
+            this.log(`${keyCount} API key(s) configured for authentication`);
+          }
+        }
+
         resolve();
       });
     });
@@ -262,8 +281,19 @@ class ClaudeService {
    */
   handleClient(socket) {
     const clientId = ++this.clientIdCounter;
-    this.log(`Client ${clientId} connected`);
-    this.clients.set(clientId, socket);
+    const remoteAddr = socket.remoteAddress;
+    const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+
+    this.log(`Client ${clientId} connected from ${remoteAddr}`);
+
+    // Client state
+    const clientState = {
+      socket,
+      authenticated: !this.remoteMode || isLocal, // Local connections auto-authenticated
+      keyName: isLocal ? 'local' : null
+    };
+
+    this.clients.set(clientId, clientState);
 
     let buffer = '';
 
@@ -276,7 +306,18 @@ class ClaudeService {
         buffer = buffer.slice(idx + 1);
 
         try {
-          this.handleMessage(clientId, JSON.parse(msg));
+          const parsed = JSON.parse(msg);
+
+          // Check authentication for non-local connections
+          if (!clientState.authenticated) {
+            if (parsed.type === 'auth') {
+              this.handleAuth(clientId, parsed);
+            } else {
+              this.sendTo(clientId, { type: 'error', message: 'Authentication required' });
+            }
+          } else {
+            this.handleMessage(clientId, parsed);
+          }
         } catch (e) {
           // Ignore parse errors
         }
@@ -292,8 +333,39 @@ class ClaudeService {
       this.clients.delete(clientId);
     });
 
-    // Welcome message
-    this.sendTo(clientId, { type: 'connected', port: this.port });
+    // Welcome message with auth requirement
+    if (clientState.authenticated) {
+      this.sendTo(clientId, { type: 'connected', port: this.port });
+    } else {
+      this.sendTo(clientId, { type: 'auth_required', message: 'Please authenticate with API key' });
+    }
+  }
+
+  /**
+   * Handle authentication message
+   */
+  handleAuth(clientId, msg) {
+    const clientState = this.clients.get(clientId);
+    if (!clientState) return;
+
+    const result = this.apiKeyManager.validate(msg.key);
+
+    if (result.valid) {
+      clientState.authenticated = true;
+      clientState.keyName = result.name;
+      this.log(`Client ${clientId} authenticated as "${result.name}"`);
+      this.sendTo(clientId, { type: 'connected', port: this.port, authenticated: true });
+    } else {
+      this.log(`Client ${clientId} authentication failed`);
+      this.sendTo(clientId, { type: 'auth_failed', message: 'Invalid API key' });
+
+      // Disconnect after failed auth
+      setTimeout(() => {
+        if (clientState.socket && !clientState.socket.destroyed) {
+          clientState.socket.end();
+        }
+      }, 1000);
+    }
   }
 
   /**
@@ -381,19 +453,21 @@ class ClaudeService {
    * Send to specific client
    */
   sendTo(clientId, msg) {
-    const socket = this.clients.get(clientId);
-    if (socket && !socket.destroyed) {
-      socket.write(JSON.stringify(msg) + '\n');
+    const clientState = this.clients.get(clientId);
+    if (clientState && clientState.socket && !clientState.socket.destroyed) {
+      clientState.socket.write(JSON.stringify(msg) + '\n');
     }
   }
 
   /**
-   * Broadcast to all clients
+   * Broadcast to all authenticated clients
    */
   broadcast(msg) {
     const data = JSON.stringify(msg) + '\n';
-    for (const [, socket] of this.clients) {
-      if (!socket.destroyed) socket.write(data);
+    for (const [, clientState] of this.clients) {
+      if (clientState.authenticated && clientState.socket && !clientState.socket.destroyed) {
+        clientState.socket.write(data);
+      }
     }
   }
 
@@ -412,8 +486,10 @@ class ClaudeService {
 
     this.broadcast({ type: 'shutdown' });
 
-    for (const [, socket] of this.clients) {
-      socket.end();
+    for (const [, clientState] of this.clients) {
+      if (clientState.socket) {
+        clientState.socket.end();
+      }
     }
     this.clients.clear();
 

@@ -13,7 +13,9 @@ const {
   runInteractive,
   sendCommand,
   showStatus,
-  runWhatsAppBridge
+  runWhatsAppBridge,
+  runVoiceBridge,
+  getAPIKeyManager
 } = require('../src');
 
 program
@@ -30,6 +32,7 @@ program
   .description('Start the Claude service')
   .option('-p, --port <port>', 'TCP port', '3377')
   .option('-f, --foreground', 'Run in foreground')
+  .option('-r, --remote', 'Enable remote access (binds to 0.0.0.0, requires API key auth)')
   .action(async (options) => {
     const status = await getServiceStatus();
 
@@ -40,12 +43,18 @@ program
     }
 
     if (options.foreground) {
-      const svc = new ClaudeService({ port: parseInt(options.port) });
+      const svc = new ClaudeService({
+        port: parseInt(options.port),
+        remote: options.remote
+      });
       await svc.start();
     } else {
       console.log('Starting Claude service...');
 
-      const child = spawn(process.execPath, [__filename, 'start', '-f', '-p', options.port], {
+      const args = ['start', '-f', '-p', options.port];
+      if (options.remote) args.push('-r');
+
+      const child = spawn(process.execPath, [__filename, ...args], {
         detached: true,
         stdio: 'ignore',
         cwd: process.cwd(),
@@ -59,12 +68,21 @@ program
       const newStatus = await getServiceStatus();
       if (newStatus.running) {
         console.log(`Service started (PID: ${newStatus.pid}, Port: ${newStatus.port})`);
+        if (options.remote) {
+          console.log('Remote mode: ENABLED (API key authentication required)');
+        }
         console.log('');
         console.log('Commands:');
         console.log('  claude-always connect        Interactive session');
         console.log('  claude-always send "text"    Send a command');
         console.log('  claude-always status         Check status');
         console.log('  claude-always stop           Stop service');
+        if (options.remote) {
+          console.log('');
+          console.log('Remote access:');
+          console.log('  claude-always keys add <name>    Generate API key');
+          console.log('  claude-always keys list          List API keys');
+        }
       } else {
         console.log('Service may have failed to start.');
         console.log('Check logs: claude-always logs');
@@ -177,8 +195,14 @@ program
   .command('connect')
   .description('Connect to Claude interactively')
   .option('-p, --port <port>', 'Service port')
+  .option('-h, --host <host>', 'Remote host (default: 127.0.0.1)')
+  .option('-k, --key <apikey>', 'API key for remote authentication')
   .action(async (options) => {
-    await runInteractive(options);
+    await runInteractive({
+      port: options.port ? parseInt(options.port) : undefined,
+      host: options.host,
+      apiKey: options.key
+    });
   });
 
 program
@@ -210,6 +234,104 @@ program
     const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000;
     const groupName = options.group || 'claudebot';
     await runWhatsAppBridge({ maxTimeout, groupName });
+  });
+
+// ============================================================================
+// Voice Mode
+// ============================================================================
+
+program
+  .command('voice')
+  .description('Start voice mode (push-to-talk with STT/TTS)')
+  .option('--stt <provider>', 'STT provider (default: whisper)', 'whisper')
+  .option('--tts <provider>', 'TTS provider (default: edge-tts)', 'edge-tts')
+  .option('--voice <name>', 'TTS voice (default: en-US-AriaNeural)', 'en-US-AriaNeural')
+  .option('--model <size>', 'Whisper model size: tiny, base, small (default: base.en)', 'base.en')
+  .option('-m, --max <seconds>', 'Max timeout per request in seconds (default: 300)')
+  .action(async (options) => {
+    const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000;
+    await runVoiceBridge({
+      sttProvider: options.stt,
+      ttsProvider: options.tts,
+      sttOptions: { model: options.model },
+      ttsOptions: { voice: options.voice },
+      maxTimeout
+    });
+  });
+
+// ============================================================================
+// API Key Management
+// ============================================================================
+
+const keysCmd = program
+  .command('keys')
+  .description('Manage API keys for remote access');
+
+keysCmd
+  .command('list')
+  .description('List all API keys')
+  .action(() => {
+    const manager = getAPIKeyManager();
+    const keys = manager.list();
+
+    if (keys.length === 0) {
+      console.log('No API keys configured.');
+      console.log('');
+      console.log('Generate one with: claude-always keys add <name>');
+      return;
+    }
+
+    console.log('API Keys:');
+    console.log('=========');
+    for (const key of keys) {
+      const lastUsed = key.lastUsed ? new Date(key.lastUsed).toLocaleString() : 'Never';
+      const created = new Date(key.created).toLocaleString();
+      console.log(`  ${key.name}`);
+      console.log(`    Created: ${created}`);
+      console.log(`    Last used: ${lastUsed}`);
+      console.log('');
+    }
+  });
+
+keysCmd
+  .command('add <name>')
+  .description('Generate a new API key')
+  .action((name) => {
+    const manager = getAPIKeyManager();
+
+    try {
+      const result = manager.generate(name);
+
+      console.log('');
+      console.log('New API key generated:');
+      console.log('======================');
+      console.log(`Name: ${result.name}`);
+      console.log(`Key:  ${result.key}`);
+      console.log('');
+      console.log('IMPORTANT: Save this key now! It cannot be retrieved later.');
+      console.log('');
+      console.log('Use this key to authenticate remote connections:');
+      console.log('  1. Connect to the service');
+      console.log('  2. Send: {"type": "auth", "key": "<your-key>"}');
+      console.log('');
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+keysCmd
+  .command('remove <name>')
+  .description('Remove an API key')
+  .action((name) => {
+    const manager = getAPIKeyManager();
+
+    if (manager.remove(name)) {
+      console.log(`API key "${name}" removed.`);
+    } else {
+      console.error(`API key "${name}" not found.`);
+      process.exit(1);
+    }
   });
 
 program.parse();
