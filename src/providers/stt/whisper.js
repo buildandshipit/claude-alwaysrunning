@@ -77,8 +77,8 @@ class WhisperProvider extends STTProvider {
   async findWhisper() {
     const isWindows = os.platform() === 'win32';
     const names = isWindows
-      ? ['whisper.exe', 'main.exe', 'whisper-cpp.exe']
-      : ['whisper', 'whisper-cpp', 'main'];
+      ? ['whisper-cli.exe', 'whisper.exe', 'main.exe', 'whisper-cpp.exe']
+      : ['whisper-cli', 'whisper', 'whisper-cpp', 'main'];
 
     // Check in PATH
     for (const name of names) {
@@ -97,11 +97,16 @@ class WhisperProvider extends STTProvider {
     // Check common locations
     const commonPaths = isWindows
       ? [
+          path.join(os.homedir(), 'Downloads', 'whisper-bin-x64', 'Release', 'whisper-cli.exe'),
+          path.join(os.homedir(), 'Downloads', 'whisper-bin-x64', 'whisper-cli.exe'),
+          path.join(process.env.LOCALAPPDATA || '', 'Programs', 'whisper.cpp', 'whisper-cli.exe'),
           path.join(process.env.LOCALAPPDATA || '', 'Programs', 'whisper.cpp', 'whisper.exe'),
+          path.join(os.homedir(), 'whisper.cpp', 'whisper-cli.exe'),
           path.join(os.homedir(), 'whisper.cpp', 'main.exe'),
           'C:\\whisper.cpp\\main.exe'
         ]
       : [
+          '/usr/local/bin/whisper-cli',
           '/usr/local/bin/whisper',
           '/opt/homebrew/bin/whisper',
           path.join(os.homedir(), 'whisper.cpp', 'main')
