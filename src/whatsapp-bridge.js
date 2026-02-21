@@ -164,7 +164,7 @@ class WhatsAppBridge {
   sendToClaude(text) {
     return new Promise((resolve, reject) => {
       const escapedText = text.replace(/"/g, '\\"');
-      const command = `claude --print --dangerously-skip-permissions "${escapedText}"`;
+      const command = `claude --print --continue --dangerously-skip-permissions "${escapedText}"`;
 
       const claude = spawn(command, [], {
         cwd: process.cwd(),
