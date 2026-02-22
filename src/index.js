@@ -9,6 +9,11 @@ const { VoiceBridge, runVoiceBridge } = require('./voice-bridge');
 const { APIKeyManager, getAPIKeyManager } = require('./auth');
 const providers = require('./providers');
 
+// Jarvis features
+const { MemoryStore, getMemoryStore, ContextBuilder, getContextBuilder } = require('./memory');
+const { SchedulerManager, getSchedulerManager, parseTime, parseCronPattern, parseRelativeTime, parseReminderTime, isValidCron } = require('./scheduler');
+const { AlertChannels, getAlertChannels } = require('./alerts');
+
 module.exports = {
   // Service
   ClaudeService,
@@ -33,5 +38,24 @@ module.exports = {
   getAPIKeyManager,
 
   // Providers
-  ...providers
+  ...providers,
+
+  // Memory
+  MemoryStore,
+  getMemoryStore,
+  ContextBuilder,
+  getContextBuilder,
+
+  // Scheduler
+  SchedulerManager,
+  getSchedulerManager,
+  parseTime,
+  parseCronPattern,
+  parseRelativeTime,
+  parseReminderTime,
+  isValidCron,
+
+  // Alerts
+  AlertChannels,
+  getAlertChannels
 };

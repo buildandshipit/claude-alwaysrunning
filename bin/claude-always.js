@@ -15,7 +15,10 @@ const {
   showStatus,
   runWhatsAppBridge,
   runVoiceBridge,
-  getAPIKeyManager
+  getAPIKeyManager,
+  getMemoryStore,
+  getSchedulerManager,
+  parseReminderTime
 } = require('../src');
 
 program
@@ -338,6 +341,212 @@ keysCmd
       console.error(`API key "${name}" not found.`);
       process.exit(1);
     }
+  });
+
+// ============================================================================
+// Memory Management
+// ============================================================================
+
+const memoryCmd = program
+  .command('memory')
+  .description('Manage Jarvis memory (conversations, facts, reminders)');
+
+memoryCmd
+  .command('stats')
+  .description('Show memory statistics')
+  .action(() => {
+    const store = getMemoryStore();
+    const stats = store.getStats();
+
+    console.log('Jarvis Memory Stats');
+    console.log('===================');
+    console.log(`Conversations: ${stats.conversations}`);
+    console.log(`Messages: ${stats.messages}`);
+    console.log(`Facts: ${stats.facts}`);
+    console.log(`Reminders:`);
+    console.log(`  Pending: ${stats.reminders.pending}`);
+    console.log(`  Completed: ${stats.reminders.completed}`);
+    console.log(`  Cancelled: ${stats.reminders.cancelled}`);
+  });
+
+memoryCmd
+  .command('facts')
+  .description('List stored facts and preferences')
+  .option('-c, --category <category>', 'Filter by category')
+  .action((options) => {
+    const store = getMemoryStore();
+    const facts = store.getFacts(options.category);
+
+    if (facts.length === 0) {
+      console.log('No facts stored.');
+      return;
+    }
+
+    console.log('Stored Facts');
+    console.log('============');
+
+    // Group by category
+    const grouped = {};
+    for (const fact of facts) {
+      const cat = fact.category || 'general';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(fact);
+    }
+
+    for (const [category, catFacts] of Object.entries(grouped)) {
+      console.log(`\n[${category}]`);
+      for (const fact of catFacts) {
+        const date = new Date(fact.created_at).toLocaleDateString();
+        console.log(`  ${fact.id}. ${fact.fact} (${date})`);
+      }
+    }
+  });
+
+memoryCmd
+  .command('add-fact')
+  .description('Add a fact or preference')
+  .argument('<fact>', 'The fact to remember')
+  .option('-c, --category <category>', 'Category (default: general)', 'general')
+  .action((fact, options) => {
+    const store = getMemoryStore();
+    const id = store.addFact(fact, options.category);
+    console.log(`Fact added (ID: ${id})`);
+  });
+
+memoryCmd
+  .command('remove-fact <id>')
+  .description('Remove a fact by ID')
+  .action((id) => {
+    const store = getMemoryStore();
+    store.removeFact(parseInt(id));
+    console.log(`Fact ${id} removed.`);
+  });
+
+memoryCmd
+  .command('clear')
+  .description('Clear all memory (conversations, facts, reminders)')
+  .option('-y, --yes', 'Skip confirmation')
+  .action(async (options) => {
+    if (!options.yes) {
+      const readline = require('readline');
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+
+      const answer = await new Promise(resolve => {
+        rl.question('Are you sure you want to clear ALL memory? (yes/no): ', resolve);
+      });
+      rl.close();
+
+      if (answer.toLowerCase() !== 'yes') {
+        console.log('Cancelled.');
+        return;
+      }
+    }
+
+    const store = getMemoryStore();
+    store.clearAll();
+    console.log('All memory cleared.');
+  });
+
+// ============================================================================
+// Reminders
+// ============================================================================
+
+program
+  .command('remind')
+  .description('Set a reminder')
+  .argument('<message>', 'Reminder message')
+  .option('--at <time>', 'Trigger at specific time (e.g., "5pm", "tomorrow at 9am")')
+  .option('--in <duration>', 'Trigger after duration (e.g., "30 minutes", "2 hours")')
+  .option('--cron <expression>', 'Cron expression for recurring (e.g., "0 9 * * 1-5")')
+  .option('-c, --channel <channel>', 'Alert channel: notification, voice, whatsapp', 'notification')
+  .action((message, options) => {
+    const store = getMemoryStore();
+
+    let timeSpec;
+    if (options.at) {
+      timeSpec = options.at;
+    } else if (options.in) {
+      timeSpec = `in ${options.in}`;
+    } else if (options.cron) {
+      // Direct cron expression
+      const id = store.addReminder(message, null, options.cron, options.channel);
+      console.log(`Recurring reminder set (ID: ${id})`);
+      console.log(`  Message: ${message}`);
+      console.log(`  Cron: ${options.cron}`);
+      console.log(`  Channel: ${options.channel}`);
+      return;
+    } else {
+      console.error('Please specify --at, --in, or --cron');
+      process.exit(1);
+    }
+
+    const parsed = parseReminderTime(timeSpec);
+    if (!parsed) {
+      console.error(`Could not parse time: "${timeSpec}"`);
+      process.exit(1);
+    }
+
+    if (parsed.type === 'recurring') {
+      const id = store.addReminder(message, null, parsed.cron, options.channel);
+      console.log(`Recurring reminder set (ID: ${id})`);
+      console.log(`  Message: ${message}`);
+      console.log(`  Schedule: ${parsed.description}`);
+      console.log(`  Channel: ${options.channel}`);
+    } else {
+      const triggerAt = parsed.date.toISOString();
+      const id = store.addReminder(message, triggerAt, null, options.channel);
+      console.log(`Reminder set (ID: ${id})`);
+      console.log(`  Message: ${message}`);
+      console.log(`  Time: ${parsed.date.toLocaleString()}`);
+      console.log(`  Channel: ${options.channel}`);
+    }
+  });
+
+program
+  .command('reminders')
+  .description('List pending reminders')
+  .action(() => {
+    const store = getMemoryStore();
+    const reminders = store.getPendingReminders();
+
+    if (reminders.length === 0) {
+      console.log('No pending reminders.');
+      return;
+    }
+
+    console.log('Pending Reminders');
+    console.log('=================');
+
+    for (const reminder of reminders) {
+      console.log(`\n${reminder.id}. ${reminder.message}`);
+      if (reminder.trigger_at) {
+        const time = new Date(reminder.trigger_at).toLocaleString();
+        console.log(`   Time: ${time}`);
+      }
+      if (reminder.cron_expression) {
+        console.log(`   Cron: ${reminder.cron_expression}`);
+      }
+      console.log(`   Channel: ${reminder.channel}`);
+    }
+  });
+
+program
+  .command('cancel-reminder <id>')
+  .description('Cancel a reminder by ID')
+  .action((id) => {
+    const store = getMemoryStore();
+    const reminder = store.getReminder(parseInt(id));
+
+    if (!reminder) {
+      console.error(`Reminder ${id} not found.`);
+      process.exit(1);
+    }
+
+    store.cancelReminder(parseInt(id));
+    console.log(`Reminder ${id} cancelled: "${reminder.message}"`);
   });
 
 program.parse();

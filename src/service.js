@@ -13,6 +13,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { getAPIKeyManager } = require('./auth');
+const { getSchedulerManager } = require('./scheduler');
+const { getAlertChannels } = require('./alerts');
 
 const DEFAULT_PORT = 3377;
 const RESTART_DELAY = 2000;
@@ -46,6 +48,10 @@ class ClaudeService {
     // Authentication
     this.apiKeyManager = this.remoteMode ? getAPIKeyManager() : null;
 
+    // Scheduler and alerts
+    this.scheduler = getSchedulerManager();
+    this.alertChannels = getAlertChannels();
+
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
     this.portFile = path.join(this.configDir, 'service.port');
@@ -75,6 +81,9 @@ class ClaudeService {
 
     // Start TCP server
     await this.startServer();
+
+    // Start scheduler for reminders
+    this.startScheduler();
 
     // Setup signal handlers
     this.setupSignalHandlers();
@@ -472,11 +481,30 @@ class ClaudeService {
   }
 
   /**
+   * Start the scheduler for reminders
+   */
+  startScheduler() {
+    // Set up alert handler
+    this.scheduler.setAlertHandler(async (reminder) => {
+      await this.alertChannels.send(reminder);
+    });
+
+    // Start the scheduler
+    this.scheduler.start();
+    this.log('Scheduler started for reminders');
+  }
+
+  /**
    * Stop the service
    */
   async stop() {
     this.log('Stopping service...');
     this.isShuttingDown = true;
+
+    // Stop scheduler
+    if (this.scheduler) {
+      this.scheduler.stop();
+    }
 
     // Clear ready check interval
     if (this.readyCheckInterval) {
