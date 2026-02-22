@@ -3,18 +3,22 @@
  *
  * Connects WhatsApp (via whatsapp-web.js) to Claude.
  * Listens for messages in self-chat and responds via Claude.
+ * Supports voice messages with STT/TTS.
  */
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { createSTTProvider } = require('./providers/stt');
+const { createTTSProvider } = require('./providers/tts');
 
 class WhatsAppBridge {
   constructor(options = {}) {
     this.sessionDir = path.join(os.homedir(), '.claude-alwaysrunning', 'whatsapp-session');
+    this.tempDir = path.join(os.homedir(), '.claude-alwaysrunning', 'temp');
     this.client = null;
     this.ready = false;
     this.processing = false;
@@ -22,19 +26,46 @@ class WhatsAppBridge {
     this.maxTimeout = options.maxTimeout || 300000; // 5 minutes
     this.groupName = options.groupName || 'claudebot'; // Target group name
     this.sentMessages = new Set(); // Track messages we've sent to avoid loops
+
+    // Voice options
+    this.voiceEnabled = options.voice || false;
+    this.voiceResponse = options.voiceResponse || false; // Reply with voice
+    this.sttProvider = options.sttProvider || 'whisper';
+    this.ttsProvider = options.ttsProvider || 'edge-tts';
+    this.ttsVoice = options.ttsVoice || 'en-US-AriaNeural';
+    this.stt = null;
+    this.tts = null;
   }
 
   /**
    * Start the WhatsApp bridge
    */
   async start() {
-    // Ensure session directory exists
+    // Ensure directories exist
     if (!fs.existsSync(this.sessionDir)) {
       fs.mkdirSync(this.sessionDir, { recursive: true });
+    }
+    if (!fs.existsSync(this.tempDir)) {
+      fs.mkdirSync(this.tempDir, { recursive: true });
     }
 
     console.log('Starting WhatsApp Bridge...');
     console.log('Session will be stored in:', this.sessionDir);
+
+    // Initialize voice providers if enabled
+    if (this.voiceEnabled) {
+      console.log('Initializing voice support...');
+      this.stt = createSTTProvider(this.sttProvider, {});
+      await this.stt.initialize();
+      console.log(`STT initialized (${this.sttProvider})`);
+
+      if (this.voiceResponse) {
+        this.tts = createTTSProvider(this.ttsProvider, { voice: this.ttsVoice });
+        await this.tts.initialize();
+        console.log(`TTS initialized (${this.ttsProvider}, voice: ${this.ttsVoice})`);
+      }
+    }
+
     console.log('');
 
     this.client = new Client({
@@ -123,15 +154,39 @@ class WhatsAppBridge {
       return;
     }
 
-    // Skip status updates and media-only messages
-    if (message.isStatus || (!message.body && !message.hasMedia)) {
+    // Skip status updates
+    if (message.isStatus) {
       return;
     }
 
-    const text = message.body.trim();
+    let text = message.body ? message.body.trim() : '';
+    let isVoiceMessage = false;
+
+    // Handle voice messages
+    if (message.hasMedia && this.voiceEnabled) {
+      const media = await message.downloadMedia();
+      if (media && (media.mimetype.startsWith('audio/') || message.type === 'ptt')) {
+        isVoiceMessage = true;
+        console.log('[Received] Voice message, transcribing...');
+
+        try {
+          text = await this.transcribeAudio(media);
+          if (text) {
+            console.log(`[Transcribed] ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+          }
+        } catch (err) {
+          console.error('[Transcription Error]', err.message);
+          const errMsg = await chat.sendMessage(`Could not transcribe voice message: ${err.message}`);
+          this.sentMessages.add(errMsg.id._serialized);
+          return;
+        }
+      }
+    }
+
+    // Skip if no text
     if (!text) return;
 
-    console.log(`[Received] ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
+    console.log(`[Processing] ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
 
     this.processing = true;
 
@@ -139,12 +194,19 @@ class WhatsAppBridge {
       const response = await this.sendToClaude(text);
 
       if (response) {
-        // WhatsApp has message length limits, split if needed
-        const chunks = this.splitMessage(response, 4000);
+        // Determine if we should reply with voice
+        const replyWithVoice = this.voiceResponse && (isVoiceMessage || this.voiceResponse === 'always');
 
-        for (const chunk of chunks) {
-          const sent = await chat.sendMessage(chunk);
-          this.sentMessages.add(sent.id._serialized);
+        if (replyWithVoice && this.tts) {
+          // Send voice response
+          await this.sendVoiceResponse(chat, response);
+        } else {
+          // Send text response
+          const chunks = this.splitMessage(response, 4000);
+          for (const chunk of chunks) {
+            const sent = await chat.sendMessage(chunk);
+            this.sentMessages.add(sent.id._serialized);
+          }
         }
 
         console.log(`[Replied] ${response.substring(0, 50)}${response.length > 50 ? '...' : ''}`);
@@ -156,6 +218,124 @@ class WhatsAppBridge {
     } finally {
       this.processing = false;
     }
+  }
+
+  /**
+   * Transcribe audio message using STT
+   */
+  async transcribeAudio(media) {
+    // Convert base64 to buffer
+    const audioBuffer = Buffer.from(media.data, 'base64');
+
+    // Save to temp file (Whisper needs a file)
+    const tempFile = path.join(this.tempDir, `voice_${Date.now()}.ogg`);
+    fs.writeFileSync(tempFile, audioBuffer);
+
+    try {
+      // Convert to WAV if needed (Whisper works best with WAV)
+      const wavFile = await this.convertToWav(tempFile);
+      const wavBuffer = fs.readFileSync(wavFile);
+
+      // Transcribe
+      const text = await this.stt.transcribe(wavBuffer);
+
+      // Cleanup
+      try { fs.unlinkSync(wavFile); } catch (e) {}
+
+      return text;
+    } finally {
+      try { fs.unlinkSync(tempFile); } catch (e) {}
+    }
+  }
+
+  /**
+   * Convert audio file to WAV format
+   */
+  convertToWav(inputFile) {
+    return new Promise((resolve, reject) => {
+      const outputFile = inputFile.replace(/\.[^.]+$/, '.wav');
+
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', inputFile,
+        '-ar', '16000',
+        '-ac', '1',
+        '-acodec', 'pcm_s16le',
+        '-y',
+        outputFile
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          resolve(outputFile);
+        } else {
+          reject(new Error(`ffmpeg conversion failed with code ${code}`));
+        }
+      });
+
+      ffmpeg.on('error', reject);
+    });
+  }
+
+  /**
+   * Send voice response using TTS
+   */
+  async sendVoiceResponse(chat, text) {
+    // Truncate very long responses for TTS
+    let textToSpeak = text;
+    if (textToSpeak.length > 2000) {
+      textToSpeak = textToSpeak.substring(0, 2000) + '... Message truncated.';
+    }
+
+    // Generate audio
+    const audioBuffer = await this.tts.synthesize(textToSpeak);
+
+    // Save to temp file
+    const tempFile = path.join(this.tempDir, `response_${Date.now()}.mp3`);
+    fs.writeFileSync(tempFile, audioBuffer);
+
+    try {
+      // Convert to OGG/Opus for WhatsApp voice note format
+      const oggFile = await this.convertToOgg(tempFile);
+
+      // Send as voice note (ptt = push to talk)
+      const media = MessageMedia.fromFilePath(oggFile);
+      const sent = await chat.sendMessage(media, { sendAudioAsVoice: true });
+      this.sentMessages.add(sent.id._serialized);
+
+      // Cleanup
+      try { fs.unlinkSync(oggFile); } catch (e) {}
+    } finally {
+      try { fs.unlinkSync(tempFile); } catch (e) {}
+    }
+  }
+
+  /**
+   * Convert audio file to OGG/Opus format for WhatsApp
+   */
+  convertToOgg(inputFile) {
+    return new Promise((resolve, reject) => {
+      const outputFile = inputFile.replace(/\.[^.]+$/, '.ogg');
+
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', inputFile,
+        '-acodec', 'libopus',
+        '-ar', '48000',
+        '-ac', '1',
+        '-b:a', '64k',
+        '-y',
+        outputFile
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          resolve(outputFile);
+        } else {
+          reject(new Error(`ffmpeg OGG conversion failed with code ${code}`));
+        }
+      });
+
+      ffmpeg.on('error', reject);
+    });
   }
 
   /**

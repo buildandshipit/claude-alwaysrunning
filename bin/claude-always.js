@@ -230,10 +230,27 @@ program
   .description('Start WhatsApp bridge (messages in group go to Claude)')
   .option('-g, --group <name>', 'Group name to listen to (default: claudebot)')
   .option('-m, --max <seconds>', 'Max timeout per message in seconds (default: 300)')
+  .option('-v, --voice', 'Enable voice message support (transcribe incoming voice)')
+  .option('-r, --voice-response [mode]', 'Reply with voice (modes: auto, always). Auto replies with voice only to voice messages.')
+  .option('--tts-voice <name>', 'TTS voice (default: en-US-AriaNeural)', 'en-US-AriaNeural')
   .action(async (options) => {
     const maxTimeout = options.max ? parseInt(options.max) * 1000 : 300000;
     const groupName = options.group || 'claudebot';
-    await runWhatsAppBridge({ maxTimeout, groupName });
+
+    // Voice options
+    const voiceEnabled = options.voice || options.voiceResponse;
+    let voiceResponse = false;
+    if (options.voiceResponse) {
+      voiceResponse = options.voiceResponse === 'always' ? 'always' : true;
+    }
+
+    await runWhatsAppBridge({
+      maxTimeout,
+      groupName,
+      voice: voiceEnabled,
+      voiceResponse,
+      ttsVoice: options.ttsVoice
+    });
   });
 
 // ============================================================================
