@@ -1,17 +1,14 @@
 /**
  * Edge TTS Provider
  *
- * Uses Microsoft Edge's free text-to-speech service.
- * Based on the edge-tts protocol (WebSocket connection to Azure TTS).
+ * Uses Microsoft Edge's free text-to-speech service via Python edge-tts CLI.
  */
 
 const { TTSProvider } = require('./base');
-const crypto = require('crypto');
-const https = require('https');
-const WebSocket = require('ws');
-
-// Edge TTS WebSocket endpoint
-const WSS_URL = 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1';
+const { spawn, execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 // Default voices - these are high-quality neural voices
 const DEFAULT_VOICES = {
@@ -34,6 +31,7 @@ class EdgeTTSProvider extends TTSProvider {
     this.rate = options.rate || '+0%';
     this.volume = options.volume || '+0%';
     this.pitch = options.pitch || '+0Hz';
+    this.edgeTTSPath = null;
   }
 
   get name() {
@@ -41,66 +39,64 @@ class EdgeTTSProvider extends TTSProvider {
   }
 
   async initialize() {
+    // Find edge-tts command
+    this.edgeTTSPath = await this.findEdgeTTS();
+    if (!this.edgeTTSPath) {
+      throw new Error(
+        'edge-tts not found. Please install it:\n' +
+        '  pip install edge-tts'
+      );
+    }
     console.log(`Edge TTS initialized (voice: ${this.voice})`);
   }
 
-  /**
-   * Generate headers for Edge TTS connection
-   */
-  getHeaders() {
-    const date = new Date().toUTCString();
-    return {
-      'Pragma': 'no-cache',
-      'Cache-Control': 'no-cache',
-      'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
-    };
-  }
+  async findEdgeTTS() {
+    // Check common locations
+    const pythonScriptsDir = path.join(
+      os.homedir(),
+      'AppData', 'Roaming', 'Python', 'Python313', 'Scripts'
+    );
 
-  /**
-   * Generate a unique request ID
-   */
-  generateRequestId() {
-    return crypto.randomUUID().replace(/-/g, '');
-  }
+    const possiblePaths = [
+      path.join(pythonScriptsDir, 'edge-tts.exe'),
+      path.join(pythonScriptsDir, 'edge-tts'),
+      'edge-tts' // Try PATH
+    ];
 
-  /**
-   * Create SSML markup for the text
-   */
-  createSSML(text) {
-    // Escape XML special characters
-    const escaped = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
+    // Also check Python312, Python311, etc.
+    for (let v = 313; v >= 38; v--) {
+      const dir = path.join(os.homedir(), 'AppData', 'Roaming', 'Python', `Python${v}`, 'Scripts');
+      possiblePaths.push(path.join(dir, 'edge-tts.exe'));
+      possiblePaths.push(path.join(dir, 'edge-tts'));
+    }
 
-    return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">
-      <voice name="${this.voice}">
-        <prosody rate="${this.rate}" volume="${this.volume}" pitch="${this.pitch}">
-          ${escaped}
-        </prosody>
-      </voice>
-    </speak>`;
-  }
+    for (const p of possiblePaths) {
+      try {
+        if (p.includes(path.sep)) {
+          // Check if file exists
+          if (fs.existsSync(p)) {
+            return p;
+          }
+        } else {
+          // Check if command exists in PATH
+          const checkCmd = os.platform() === 'win32' ? 'where' : 'which';
+          execSync(`${checkCmd} ${p}`, { stdio: ['pipe', 'pipe', 'ignore'] });
+          return p;
+        }
+      } catch (e) {
+        // Continue checking
+      }
+    }
 
-  /**
-   * Create WebSocket configuration message
-   */
-  createConfigMessage(requestId) {
-    const timestamp = new Date().toISOString();
-    return `X-Timestamp:${timestamp}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`;
-  }
+    // Try running python -m edge_tts
+    try {
+      execSync('python -m edge_tts --help', { stdio: ['pipe', 'pipe', 'ignore'] });
+      return 'python -m edge_tts';
+    } catch (e) {
+      // Not found
+    }
 
-  /**
-   * Create SSML message for synthesis
-   */
-  createSSMLMessage(requestId, ssml) {
-    const timestamp = new Date().toISOString();
-    return `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${timestamp}\r\nPath:ssml\r\n\r\n${ssml}`;
+    return null;
   }
 
   async synthesize(text) {
@@ -108,79 +104,85 @@ class EdgeTTSProvider extends TTSProvider {
       return Buffer.alloc(0);
     }
 
+    const tempFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
+
+    try {
+      await this.runEdgeTTS(text, tempFile);
+
+      // Read the audio file
+      const audioBuffer = fs.readFileSync(tempFile);
+      return audioBuffer;
+    } catch (err) {
+      console.error('[Edge TTS error]:', err.message);
+      throw err;
+    } finally {
+      // Clean up temp file
+      try { fs.unlinkSync(tempFile); } catch (e) {}
+    }
+  }
+
+  runEdgeTTS(text, outputFile) {
     return new Promise((resolve, reject) => {
-      const requestId = this.generateRequestId();
-      const ssml = this.createSSML(text);
-      const audioChunks = [];
+      // Escape text for shell
+      const escapedText = text.replace(/"/g, '\\"');
 
-      // Connect to Edge TTS WebSocket
-      const wsUrl = `${WSS_URL}?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4&ConnectionId=${requestId}`;
+      let cmd, args;
 
-      const ws = new WebSocket(wsUrl, {
-        headers: this.getHeaders()
+      if (this.edgeTTSPath.startsWith('python')) {
+        cmd = 'python';
+        args = [
+          '-m', 'edge_tts',
+          '--voice', this.voice,
+          '--rate', this.rate,
+          '--volume', this.volume,
+          '--pitch', this.pitch,
+          '--text', `"${escapedText}"`,
+          '--write-media', outputFile
+        ];
+      } else {
+        cmd = this.edgeTTSPath;
+        args = [
+          '--voice', this.voice,
+          '--rate', this.rate,
+          '--volume', this.volume,
+          '--pitch', this.pitch,
+          '--text', `"${escapedText}"`,
+          '--write-media', outputFile
+        ];
+      }
+
+      const proc = spawn(cmd, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true  // Always use shell to handle quoting
       });
 
-      let configSent = false;
-      let timeout = null;
+      let stderr = '';
 
-      const cleanup = () => {
-        if (timeout) clearTimeout(timeout);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close();
-        }
-      };
-
-      // Timeout after 30 seconds
-      timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('Edge TTS synthesis timeout'));
-      }, 30000);
-
-      ws.on('open', () => {
-        // Send config first
-        ws.send(this.createConfigMessage(requestId));
-        configSent = true;
-
-        // Then send SSML
-        ws.send(this.createSSMLMessage(requestId, ssml));
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
       });
 
-      ws.on('message', (data, isBinary) => {
-        if (isBinary) {
-          // Binary message contains audio data
-          // First 2 bytes are header length
-          const headerLength = data.readUInt16BE(0);
-          const audioData = data.slice(headerLength + 2);
-          if (audioData.length > 0) {
-            audioChunks.push(audioData);
-          }
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve();
         } else {
-          // Text message - check for turn.end
-          const message = data.toString();
-          if (message.includes('Path:turn.end')) {
-            cleanup();
-            const audioBuffer = Buffer.concat(audioChunks);
-            resolve(audioBuffer);
-          }
+          reject(new Error(`edge-tts failed: ${stderr || `exit code ${code}`}`));
         }
       });
 
-      ws.on('error', (err) => {
-        cleanup();
+      proc.on('error', (err) => {
         reject(err);
       });
 
-      ws.on('close', (code, reason) => {
-        cleanup();
-        if (audioChunks.length === 0) {
-          reject(new Error(`WebSocket closed unexpectedly: ${code} ${reason}`));
-        }
-      });
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        proc.kill();
+        reject(new Error('edge-tts timeout'));
+      }, 30000);
     });
   }
 
   async getVoices() {
-    // Return a selection of popular voices
     return [
       { id: 'en-US-AriaNeural', name: 'Aria (US Female)', language: 'en-US' },
       { id: 'en-US-GuyNeural', name: 'Guy (US Male)', language: 'en-US' },
@@ -197,26 +199,14 @@ class EdgeTTSProvider extends TTSProvider {
     this.voice = voiceId;
   }
 
-  /**
-   * Set speech rate
-   * @param {string} rate - Rate adjustment (e.g., '+20%', '-10%', '1.5')
-   */
   setRate(rate) {
     this.rate = rate;
   }
 
-  /**
-   * Set volume
-   * @param {string} volume - Volume adjustment (e.g., '+0%', '-20%')
-   */
   setVolume(volume) {
     this.volume = volume;
   }
 
-  /**
-   * Set pitch
-   * @param {string} pitch - Pitch adjustment (e.g., '+0Hz', '-50Hz')
-   */
   setPitch(pitch) {
     this.pitch = pitch;
   }
