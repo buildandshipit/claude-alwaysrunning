@@ -195,10 +195,25 @@ class VoiceBridge {
         console.log(`Claude: ${response}`);
         console.log('');
 
-        // Speak the response
-        console.log('[Speaking...]');
-        const audioResponse = await this.tts.synthesize(response);
-        await this.player.play(audioResponse);
+        // Speak the response (truncate if too long for TTS)
+        let textToSpeak = response;
+        const maxLength = 2000; // Edge TTS works best with shorter text
+        if (textToSpeak.length > maxLength) {
+          textToSpeak = textToSpeak.substring(0, maxLength) + '... Response truncated for speech.';
+          console.log('[Response truncated for speech]');
+        }
+
+        try {
+          console.log('[Speaking...]');
+          const audioResponse = await this.tts.synthesize(textToSpeak);
+          if (audioResponse && audioResponse.length > 0) {
+            await this.player.play(audioResponse);
+          } else {
+            console.log('[TTS returned empty audio]');
+          }
+        } catch (ttsErr) {
+          console.error(`[TTS Error: ${ttsErr.message}]`);
+        }
       }
 
       console.log('');
