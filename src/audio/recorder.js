@@ -35,7 +35,14 @@ class AudioRecorder {
         '  - macOS: Built-in (uses rec from sox)'
       );
     }
-    console.log(`Audio recorder initialized (using: ${this.recordingTool})`);
+
+    // Pre-detect Windows audio device
+    if (os.platform() === 'win32' && this.recordingTool === 'ffmpeg') {
+      const device = this.getWindowsAudioDevice();
+      console.log(`Audio recorder initialized (using: ${this.recordingTool}, device: ${device})`);
+    } else {
+      console.log(`Audio recorder initialized (using: ${this.recordingTool})`);
+    }
   }
 
   /**
@@ -155,6 +162,49 @@ class AudioRecorder {
   }
 
   /**
+   * Get Windows audio input device name
+   */
+  getWindowsAudioDevice() {
+    if (this.cachedAudioDevice) {
+      return this.cachedAudioDevice;
+    }
+
+    try {
+      // List audio devices using ffmpeg (output goes to stderr, exits with code 1)
+      let result;
+      try {
+        result = execSync('ffmpeg -list_devices true -f dshow -i dummy 2>&1', {
+          encoding: 'utf8',
+          timeout: 5000
+        });
+      } catch (e) {
+        // ffmpeg exits with code 1 but still outputs the device list
+        result = e.stdout || e.stderr || (e.output ? e.output.join('') : '');
+      }
+
+      // Parse the output to find audio devices
+      const lines = result.split('\n');
+
+      for (const line of lines) {
+        // Look for lines containing (audio) which indicate audio devices
+        if (line.includes('(audio)')) {
+          // Extract device name between quotes
+          const match = line.match(/"([^"]+)"\s*\(audio\)/);
+          if (match) {
+            this.cachedAudioDevice = match[1];
+            return this.cachedAudioDevice;
+          }
+        }
+      }
+    } catch (e) {
+      // Fallback - try common names
+    }
+
+    // Fallback to generic name
+    return 'Microphone';
+  }
+
+  /**
    * Start recording with ffmpeg
    */
   startFFmpeg() {
@@ -162,8 +212,9 @@ class AudioRecorder {
     let inputArgs;
 
     if (platform === 'win32') {
-      // Windows - use dshow
-      inputArgs = ['-f', 'dshow', '-i', 'audio=Microphone'];
+      // Windows - use dshow with detected device
+      const audioDevice = this.getWindowsAudioDevice();
+      inputArgs = ['-f', 'dshow', '-i', `audio=${audioDevice}`];
     } else if (platform === 'darwin') {
       // macOS - use avfoundation
       inputArgs = ['-f', 'avfoundation', '-i', ':0'];
@@ -186,6 +237,14 @@ class AudioRecorder {
 
     this.process.stdout.on('data', (data) => {
       this.audioChunks.push(data);
+    });
+
+    this.process.stderr.on('data', (data) => {
+      // Capture stderr for debugging
+      const msg = data.toString();
+      if (msg.includes('Error') || msg.includes('error')) {
+        console.error('[FFmpeg error]:', msg.trim());
+      }
     });
   }
 
@@ -229,14 +288,12 @@ class AudioRecorder {
         return;
       }
 
-      // Send SIGINT to stop recording gracefully
-      const timeout = setTimeout(() => {
-        if (this.process) {
-          this.process.kill('SIGKILL');
-        }
-      }, 2000);
+      const proc = this.process;
+      let resolved = false;
 
-      this.process.on('close', () => {
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
         clearTimeout(timeout);
         const audioBuffer = Buffer.concat(this.audioChunks);
         this.audioChunks = [];
@@ -244,24 +301,54 @@ class AudioRecorder {
 
         // Ensure we have valid WAV data
         if (audioBuffer.length < 44) {
-          // No audio recorded, return empty WAV
           resolve(this.createEmptyWav());
         } else {
           resolve(audioBuffer);
         }
+      };
+
+      // Force kill after timeout
+      const timeout = setTimeout(() => {
+        if (proc && !resolved) {
+          try {
+            proc.kill('SIGKILL');
+          } catch (e) {
+            // Ignore
+          }
+          // Force finish even if close doesn't fire
+          setTimeout(finish, 500);
+        }
+      }, 2000);
+
+      proc.on('close', finish);
+
+      proc.on('error', (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          this.process = null;
+          reject(err);
+        }
       });
 
-      this.process.on('error', (err) => {
-        clearTimeout(timeout);
-        this.process = null;
-        reject(err);
-      });
-
-      // Send interrupt signal
-      if (os.platform() === 'win32') {
-        this.process.kill();
-      } else {
-        this.process.kill('SIGINT');
+      // Stop the process
+      try {
+        if (os.platform() === 'win32' && this.recordingTool === 'ffmpeg') {
+          // For ffmpeg on Windows, send 'q' to stdin to quit gracefully
+          if (proc.stdin && proc.stdin.writable) {
+            proc.stdin.write('q');
+            proc.stdin.end();
+          } else {
+            proc.kill();
+          }
+        } else if (os.platform() === 'win32') {
+          proc.kill();
+        } else {
+          proc.kill('SIGINT');
+        }
+      } catch (e) {
+        // Process may have already exited
+        finish();
       }
     });
   }
