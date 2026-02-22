@@ -104,7 +104,8 @@ class EdgeTTSProvider extends TTSProvider {
       return Buffer.alloc(0);
     }
 
-    const tempFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
+    // Use forward slashes for Python compatibility on Windows
+    const tempFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`).replace(/\\/g, '/');
 
     try {
       await this.runEdgeTTS(text, tempFile);
