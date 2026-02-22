@@ -6,14 +6,13 @@
  * Supports voice messages with STT/TTS.
  */
 
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { createSTTProvider } = require('./providers/stt');
-const { createTTSProvider } = require('./providers/tts');
 
 class WhatsAppBridge {
   constructor(options = {}) {
@@ -27,14 +26,10 @@ class WhatsAppBridge {
     this.groupName = options.groupName || 'claudebot'; // Target group name
     this.sentMessages = new Set(); // Track messages we've sent to avoid loops
 
-    // Voice options
-    this.voiceEnabled = options.voice || false;
-    this.voiceResponse = options.voiceResponse || false; // Reply with voice
+    // Voice options - voice input enabled by default
+    this.voiceEnabled = options.voice !== false; // Default: true
     this.sttProvider = options.sttProvider || 'whisper';
-    this.ttsProvider = options.ttsProvider || 'edge-tts';
-    this.ttsVoice = options.ttsVoice || 'en-US-AriaNeural';
     this.stt = null;
-    this.tts = null;
   }
 
   /**
@@ -52,18 +47,12 @@ class WhatsAppBridge {
     console.log('Starting WhatsApp Bridge...');
     console.log('Session will be stored in:', this.sessionDir);
 
-    // Initialize voice providers if enabled
+    // Initialize STT for voice message transcription
     if (this.voiceEnabled) {
-      console.log('Initializing voice support...');
+      console.log('Initializing voice transcription...');
       this.stt = createSTTProvider(this.sttProvider, {});
       await this.stt.initialize();
       console.log(`STT initialized (${this.sttProvider})`);
-
-      if (this.voiceResponse) {
-        this.tts = createTTSProvider(this.ttsProvider, { voice: this.ttsVoice });
-        await this.tts.initialize();
-        console.log(`TTS initialized (${this.ttsProvider}, voice: ${this.ttsVoice})`);
-      }
     }
 
     console.log('');
@@ -194,19 +183,11 @@ class WhatsAppBridge {
       const response = await this.sendToClaude(text);
 
       if (response) {
-        // Determine if we should reply with voice
-        const replyWithVoice = this.voiceResponse && (isVoiceMessage || this.voiceResponse === 'always');
-
-        if (replyWithVoice && this.tts) {
-          // Send voice response
-          await this.sendVoiceResponse(chat, response);
-        } else {
-          // Send text response
-          const chunks = this.splitMessage(response, 4000);
-          for (const chunk of chunks) {
-            const sent = await chat.sendMessage(chunk);
-            this.sentMessages.add(sent.id._serialized);
-          }
+        // Always reply with text
+        const chunks = this.splitMessage(response, 4000);
+        for (const chunk of chunks) {
+          const sent = await chat.sendMessage(chunk);
+          this.sentMessages.add(sent.id._serialized);
         }
 
         console.log(`[Replied] ${response.substring(0, 50)}${response.length > 50 ? '...' : ''}`);
@@ -269,68 +250,6 @@ class WhatsAppBridge {
           resolve(outputFile);
         } else {
           reject(new Error(`ffmpeg conversion failed with code ${code}`));
-        }
-      });
-
-      ffmpeg.on('error', reject);
-    });
-  }
-
-  /**
-   * Send voice response using TTS
-   */
-  async sendVoiceResponse(chat, text) {
-    // Truncate very long responses for TTS
-    let textToSpeak = text;
-    if (textToSpeak.length > 2000) {
-      textToSpeak = textToSpeak.substring(0, 2000) + '... Message truncated.';
-    }
-
-    // Generate audio
-    const audioBuffer = await this.tts.synthesize(textToSpeak);
-
-    // Save to temp file
-    const tempFile = path.join(this.tempDir, `response_${Date.now()}.mp3`);
-    fs.writeFileSync(tempFile, audioBuffer);
-
-    try {
-      // Convert to OGG/Opus for WhatsApp voice note format
-      const oggFile = await this.convertToOgg(tempFile);
-
-      // Send as voice note (ptt = push to talk)
-      const media = MessageMedia.fromFilePath(oggFile);
-      const sent = await chat.sendMessage(media, { sendAudioAsVoice: true });
-      this.sentMessages.add(sent.id._serialized);
-
-      // Cleanup
-      try { fs.unlinkSync(oggFile); } catch (e) {}
-    } finally {
-      try { fs.unlinkSync(tempFile); } catch (e) {}
-    }
-  }
-
-  /**
-   * Convert audio file to OGG/Opus format for WhatsApp
-   */
-  convertToOgg(inputFile) {
-    return new Promise((resolve, reject) => {
-      const outputFile = inputFile.replace(/\.[^.]+$/, '.ogg');
-
-      const ffmpeg = spawn('ffmpeg', [
-        '-i', inputFile,
-        '-acodec', 'libopus',
-        '-ar', '48000',
-        '-ac', '1',
-        '-b:a', '64k',
-        '-y',
-        outputFile
-      ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-      ffmpeg.on('close', (code) => {
-        if (code === 0) {
-          resolve(outputFile);
-        } else {
-          reject(new Error(`ffmpeg OGG conversion failed with code ${code}`));
         }
       });
 
