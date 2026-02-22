@@ -105,30 +105,39 @@ class EdgeTTSProvider extends TTSProvider {
     }
 
     // Use forward slashes for Python compatibility on Windows
-    const tempFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`).replace(/\\/g, '/');
+    const timestamp = Date.now();
+    const tempAudioFile = path.join(os.tmpdir(), `tts_${timestamp}.mp3`).replace(/\\/g, '/');
+    const tempTextFile = path.join(os.tmpdir(), `tts_${timestamp}.txt`).replace(/\\/g, '/');
 
     try {
-      await this.runEdgeTTS(text, tempFile);
+      // Write text to file to avoid shell escaping issues with long/complex text
+      fs.writeFileSync(tempTextFile, text, 'utf8');
+
+      await this.runEdgeTTS(tempTextFile, tempAudioFile);
+
+      // Check if output file exists
+      if (!fs.existsSync(tempAudioFile)) {
+        throw new Error('TTS did not produce audio file');
+      }
 
       // Read the audio file
-      const audioBuffer = fs.readFileSync(tempFile);
+      const audioBuffer = fs.readFileSync(tempAudioFile);
       return audioBuffer;
     } catch (err) {
       console.error('[Edge TTS error]:', err.message);
       throw err;
     } finally {
-      // Clean up temp file
-      try { fs.unlinkSync(tempFile); } catch (e) {}
+      // Clean up temp files
+      try { fs.unlinkSync(tempAudioFile); } catch (e) {}
+      try { fs.unlinkSync(tempTextFile); } catch (e) {}
     }
   }
 
-  runEdgeTTS(text, outputFile) {
+  runEdgeTTS(textFile, outputFile) {
     return new Promise((resolve, reject) => {
-      // Escape text for shell
-      const escapedText = text.replace(/"/g, '\\"');
-
       let cmd, args;
 
+      // Use --file instead of --text to handle long/complex text
       if (this.edgeTTSPath.startsWith('python')) {
         cmd = 'python';
         args = [
@@ -137,7 +146,7 @@ class EdgeTTSProvider extends TTSProvider {
           '--rate', this.rate,
           '--volume', this.volume,
           '--pitch', this.pitch,
-          '--text', `"${escapedText}"`,
+          '--file', textFile,
           '--write-media', outputFile
         ];
       } else {
@@ -147,17 +156,22 @@ class EdgeTTSProvider extends TTSProvider {
           '--rate', this.rate,
           '--volume', this.volume,
           '--pitch', this.pitch,
-          '--text', `"${escapedText}"`,
+          '--file', textFile,
           '--write-media', outputFile
         ];
       }
 
       const proc = spawn(cmd, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
-        shell: true  // Always use shell to handle quoting
+        shell: false  // No shell needed when using file input
       });
 
       let stderr = '';
+      let stdout = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
 
       proc.stderr.on('data', (data) => {
         stderr += data.toString();
@@ -167,7 +181,7 @@ class EdgeTTSProvider extends TTSProvider {
         if (code === 0) {
           resolve();
         } else {
-          reject(new Error(`edge-tts failed: ${stderr || `exit code ${code}`}`));
+          reject(new Error(`edge-tts failed (code ${code}): ${stderr || stdout || 'unknown error'}`));
         }
       });
 
@@ -175,11 +189,11 @@ class EdgeTTSProvider extends TTSProvider {
         reject(err);
       });
 
-      // Timeout after 30 seconds
+      // Timeout after 60 seconds for long text
       setTimeout(() => {
         proc.kill();
         reject(new Error('edge-tts timeout'));
-      }, 30000);
+      }, 60000);
     });
   }
 
