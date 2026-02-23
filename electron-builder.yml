@@ -1,0 +1,48 @@
+appId: com.claude.alwaysrunning
+productName: Claude Always Running
+copyright: Copyright (c) 2024
+
+directories:
+  output: dist-electron
+  buildResources: electron/assets
+
+files:
+  - electron/dist/**/*
+  - electron/main/**/*
+  - electron/preload/**/*
+  - src/**/*
+  - package.json
+  - "!**/*.ts"
+  - "!**/*.map"
+
+extraMetadata:
+  main: electron/main/index.js
+
+win:
+  target:
+    - nsis
+  icon: electron/assets/icon.ico
+  artifactName: ${productName}-${version}-Setup.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  target:
+    - dmg
+  icon: electron/assets/icon.icns
+  category: public.app-category.productivity
+  artifactName: ${productName}-${version}.${ext}
+
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: electron/assets/icon.png
+  category: Utility
+  artifactName: ${productName}-${version}.${ext}
+
+publish: null

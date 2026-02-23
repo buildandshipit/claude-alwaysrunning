@@ -4,3 +4,8 @@ package-lock.json
 *.log
 .claude/
 .wwebjs_cache/
+
+# Electron build outputs
+electron/dist/
+electron/dist-main/
+dist-electron/

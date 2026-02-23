@@ -12,9 +12,11 @@ const pty = require('node-pty');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const WebSocket = require('ws');
 const { getAPIKeyManager } = require('./auth');
 const { getSchedulerManager } = require('./scheduler');
 const { getAlertChannels } = require('./alerts');
+const { getMemoryStore } = require('./memory');
 
 const DEFAULT_PORT = 3377;
 const RESTART_DELAY = 2000;
@@ -30,7 +32,9 @@ class ClaudeService {
     // State
     this.ptyProcess = null;
     this.server = null;
+    this.wsServer = null;
     this.clients = new Map();
+    this.wsClients = new Map();
     this.clientIdCounter = 0;
     this.outputBuffer = [];
     this.maxBufferSize = 500;
@@ -51,6 +55,9 @@ class ClaudeService {
     // Scheduler and alerts
     this.scheduler = getSchedulerManager();
     this.alertChannels = getAlertChannels();
+
+    // Memory store for UI access
+    this.memoryStore = getMemoryStore();
 
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
@@ -81,6 +88,9 @@ class ClaudeService {
 
     // Start TCP server
     await this.startServer();
+
+    // Start WebSocket server
+    await this.startWebSocketServer();
 
     // Start scheduler for reminders
     this.startScheduler();
@@ -158,6 +168,9 @@ class ClaudeService {
         this.readyCheckInterval = null;
         this.log('Claude is ready (startup complete)');
 
+        // Notify WebSocket clients
+        this.broadcastWs({ type: 'ready', ready: true });
+
         // Process any queued commands
         this.processCommandQueue();
       }
@@ -169,9 +182,13 @@ class ClaudeService {
    */
   processCommandQueue() {
     while (this.commandQueue.length > 0) {
-      const { clientId, msg } = this.commandQueue.shift();
-      this.log(`Processing queued command from client ${clientId}`);
-      this.executeCommand(clientId, msg);
+      const { clientId, msg, isWs } = this.commandQueue.shift();
+      this.log(`Processing queued command from ${isWs ? 'WS' : 'TCP'} client ${clientId}`);
+      if (isWs) {
+        this.executeWsCommand(clientId, msg);
+      } else {
+        this.executeCommand(clientId, msg);
+      }
     }
   }
 
@@ -240,8 +257,11 @@ class ClaudeService {
       this.outputBuffer.shift();
     }
 
-    // Broadcast to clients
+    // Broadcast to TCP clients
     this.broadcast({ type: 'output', data });
+
+    // Broadcast to WebSocket clients
+    this.broadcastWs({ type: 'output', data });
   }
 
   /**
@@ -283,6 +303,316 @@ class ClaudeService {
         resolve();
       });
     });
+  }
+
+  /**
+   * Start WebSocket server on port+1 for Electron UI
+   */
+  async startWebSocketServer() {
+    return new Promise((resolve, reject) => {
+      const wsPort = this.port + 1;
+      const bindAddress = this.remoteMode ? '0.0.0.0' : '127.0.0.1';
+
+      this.wsServer = new WebSocket.Server({
+        port: wsPort,
+        host: bindAddress
+      });
+
+      this.wsServer.on('connection', (ws, req) => {
+        this.handleWebSocketClient(ws, req);
+      });
+
+      this.wsServer.on('listening', () => {
+        this.log(`WebSocket server listening on ${bindAddress}:${wsPort}`);
+        resolve();
+      });
+
+      this.wsServer.on('error', (err) => {
+        this.log(`WebSocket server error: ${err.message}`);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Handle WebSocket client connection
+   */
+  handleWebSocketClient(ws, req) {
+    const clientId = ++this.clientIdCounter;
+    const remoteAddr = req.socket.remoteAddress;
+    const isLocal = remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1';
+
+    this.log(`WebSocket client ${clientId} connected from ${remoteAddr}`);
+
+    const clientState = {
+      ws,
+      authenticated: !this.remoteMode || isLocal,
+      keyName: isLocal ? 'local' : null
+    };
+
+    this.wsClients.set(clientId, clientState);
+
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (!clientState.authenticated) {
+          if (msg.type === 'auth') {
+            this.handleWsAuth(clientId, msg);
+          } else {
+            this.sendToWs(clientId, { type: 'error', message: 'Authentication required' });
+          }
+        } else {
+          this.handleWsMessage(clientId, msg);
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    });
+
+    ws.on('close', () => {
+      this.log(`WebSocket client ${clientId} disconnected`);
+      this.wsClients.delete(clientId);
+    });
+
+    ws.on('error', () => {
+      this.wsClients.delete(clientId);
+    });
+
+    // Welcome message
+    if (clientState.authenticated) {
+      this.sendToWs(clientId, {
+        type: 'connected',
+        port: this.port,
+        wsPort: this.port + 1,
+        ready: this.claudeReady,
+        running: !!this.ptyProcess
+      });
+    } else {
+      this.sendToWs(clientId, { type: 'auth_required', message: 'Please authenticate with API key' });
+    }
+  }
+
+  /**
+   * Handle WebSocket authentication
+   */
+  handleWsAuth(clientId, msg) {
+    const clientState = this.wsClients.get(clientId);
+    if (!clientState) return;
+
+    const result = this.apiKeyManager.validate(msg.key);
+
+    if (result.valid) {
+      clientState.authenticated = true;
+      clientState.keyName = result.name;
+      this.log(`WebSocket client ${clientId} authenticated as "${result.name}"`);
+      this.sendToWs(clientId, {
+        type: 'connected',
+        port: this.port,
+        wsPort: this.port + 1,
+        authenticated: true,
+        ready: this.claudeReady,
+        running: !!this.ptyProcess
+      });
+    } else {
+      this.log(`WebSocket client ${clientId} authentication failed`);
+      this.sendToWs(clientId, { type: 'auth_failed', message: 'Invalid API key' });
+      setTimeout(() => clientState.ws.close(), 1000);
+    }
+  }
+
+  /**
+   * Handle WebSocket message
+   */
+  handleWsMessage(clientId, msg) {
+    switch (msg.type) {
+      case 'input':
+        if (this.ptyProcess) {
+          this.ptyProcess.write(msg.data);
+        } else {
+          this.sendToWs(clientId, { type: 'error', message: 'Claude not running' });
+        }
+        break;
+
+      case 'command':
+        if (!this.claudeReady) {
+          this.log(`Claude not ready, queuing command from WS client ${clientId}`);
+          this.sendToWs(clientId, { type: 'status', message: 'Waiting for Claude to be ready...' });
+          this.commandQueue.push({ clientId, msg, isWs: true });
+        } else {
+          this.executeWsCommand(clientId, msg);
+        }
+        break;
+
+      case 'status':
+        this.sendToWs(clientId, {
+          type: 'status',
+          running: !!this.ptyProcess,
+          ready: this.claudeReady,
+          pid: process.pid,
+          port: this.port,
+          wsPort: this.port + 1,
+          clients: this.clients.size,
+          wsClients: this.wsClients.size,
+          restarts: this.restartAttempts,
+          queuedCommands: this.commandQueue.length
+        });
+        break;
+
+      case 'history':
+        const limit = msg.limit || 100;
+        const history = this.outputBuffer.slice(-limit);
+        this.sendToWs(clientId, {
+          type: 'history',
+          data: history.map(h => h.data).join('')
+        });
+        break;
+
+      case 'resize':
+        if (this.ptyProcess && msg.cols && msg.rows) {
+          this.ptyProcess.resize(msg.cols, msg.rows);
+        }
+        break;
+
+      case 'ping':
+        this.sendToWs(clientId, { type: 'pong' });
+        break;
+
+      // Memory operations
+      case 'memory:stats':
+        this.sendToWs(clientId, {
+          type: 'memory:stats',
+          data: this.memoryStore.getStats()
+        });
+        break;
+
+      case 'memory:facts':
+        this.sendToWs(clientId, {
+          type: 'memory:facts',
+          data: this.memoryStore.getFacts(msg.category || null)
+        });
+        break;
+
+      case 'memory:addFact':
+        const factId = this.memoryStore.addFact(msg.fact, msg.category || 'general');
+        this.sendToWs(clientId, {
+          type: 'memory:factAdded',
+          data: { id: factId, fact: msg.fact, category: msg.category || 'general' }
+        });
+        break;
+
+      case 'memory:deleteFact':
+        this.memoryStore.removeFact(msg.id);
+        this.sendToWs(clientId, {
+          type: 'memory:factDeleted',
+          data: { id: msg.id }
+        });
+        break;
+
+      case 'memory:conversations':
+        this.sendToWs(clientId, {
+          type: 'memory:conversations',
+          data: this.memoryStore.getRecentConversations(msg.limit || 10)
+        });
+        break;
+
+      case 'memory:messages':
+        this.sendToWs(clientId, {
+          type: 'memory:messages',
+          data: this.memoryStore.getMessages(msg.conversationId, msg.limit || 100)
+        });
+        break;
+
+      // Reminder operations
+      case 'reminders:list':
+        this.sendToWs(clientId, {
+          type: 'reminders:list',
+          data: this.scheduler.listReminders()
+        });
+        break;
+
+      case 'reminders:add':
+        try {
+          const reminder = this.scheduler.addReminder(msg.message, msg.time, msg.channel || 'notification');
+          this.sendToWs(clientId, {
+            type: 'reminders:added',
+            data: reminder
+          });
+        } catch (err) {
+          this.sendToWs(clientId, {
+            type: 'error',
+            message: `Failed to add reminder: ${err.message}`
+          });
+        }
+        break;
+
+      case 'reminders:cancel':
+        this.scheduler.cancelReminder(msg.id);
+        this.sendToWs(clientId, {
+          type: 'reminders:cancelled',
+          data: { id: msg.id }
+        });
+        break;
+
+      // Logs
+      case 'logs:get':
+        try {
+          const logContent = fs.existsSync(this.logFile)
+            ? fs.readFileSync(this.logFile, 'utf8')
+            : '';
+          const lines = logContent.split('\n').filter(Boolean);
+          const lastLines = lines.slice(-(msg.lines || 100));
+          this.sendToWs(clientId, {
+            type: 'logs:content',
+            data: lastLines.join('\n')
+          });
+        } catch (err) {
+          this.sendToWs(clientId, {
+            type: 'error',
+            message: `Failed to read logs: ${err.message}`
+          });
+        }
+        break;
+    }
+  }
+
+  /**
+   * Execute command from WebSocket client
+   */
+  executeWsCommand(clientId, msg) {
+    if (this.ptyProcess) {
+      this.log(`WS Client ${clientId}: ${msg.data.substring(0, 50)}...`);
+      this.ptyProcess.write(msg.data);
+      setTimeout(() => {
+        if (this.ptyProcess && !this.isShuttingDown) {
+          this.ptyProcess.write('\r');
+        }
+      }, 200);
+    } else {
+      this.sendToWs(clientId, { type: 'error', message: 'Claude not running' });
+    }
+  }
+
+  /**
+   * Send to specific WebSocket client
+   */
+  sendToWs(clientId, msg) {
+    const clientState = this.wsClients.get(clientId);
+    if (clientState && clientState.ws.readyState === WebSocket.OPEN) {
+      clientState.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  /**
+   * Broadcast to all authenticated WebSocket clients
+   */
+  broadcastWs(msg) {
+    const data = JSON.stringify(msg);
+    for (const [, clientState] of this.wsClients) {
+      if (clientState.authenticated && clientState.ws.readyState === WebSocket.OPEN) {
+        clientState.ws.send(data);
+      }
+    }
   }
 
   /**
@@ -513,6 +843,7 @@ class ClaudeService {
     }
 
     this.broadcast({ type: 'shutdown' });
+    this.broadcastWs({ type: 'shutdown' });
 
     for (const [, clientState] of this.clients) {
       if (clientState.socket) {
@@ -521,7 +852,15 @@ class ClaudeService {
     }
     this.clients.clear();
 
+    for (const [, clientState] of this.wsClients) {
+      if (clientState.ws) {
+        clientState.ws.close();
+      }
+    }
+    this.wsClients.clear();
+
     if (this.server) this.server.close();
+    if (this.wsServer) this.wsServer.close();
     if (this.ptyProcess) this.ptyProcess.kill();
 
     this.cleanup();
