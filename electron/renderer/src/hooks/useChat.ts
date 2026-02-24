@@ -7,6 +7,22 @@ interface Message {
   timestamp: Date;
 }
 
+// Strip ANSI escape codes from terminal output
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|\][^\x1B]*\x1B\\)/g, '');
+}
+
+// Clean terminal output for display
+function cleanOutput(str: string): string {
+  let cleaned = stripAnsi(str);
+  // Remove common terminal control sequences
+  cleaned = cleaned.replace(/\]\d;[^\x07\x1B]*(?:\x07|\x1B\\)/g, ''); // OSC sequences
+  cleaned = cleaned.replace(/\[[\?0-9;]*[a-zA-Z]/g, ''); // CSI sequences
+  cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // Control chars except \n \r \t
+  return cleaned;
+}
+
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentOutput, setCurrentOutput] = useState('');
@@ -17,8 +33,8 @@ export function useChat() {
   useEffect(() => {
     // Listen for Claude output
     const unsubOutput = window.electronAPI.onClaudeOutput((data: string) => {
-      // Accumulate streaming output
-      outputRef.current += data;
+      // Accumulate streaming output, clean ANSI codes
+      outputRef.current += cleanOutput(data);
       setCurrentOutput(outputRef.current);
       setIsStreaming(true);
     });
@@ -27,7 +43,7 @@ export function useChat() {
     const unsubHistory = window.electronAPI.onHistory((data: string) => {
       // Parse history into messages (simplified - just show as terminal output)
       if (data.trim()) {
-        setCurrentOutput(data);
+        setCurrentOutput(cleanOutput(data));
       }
     });
 
