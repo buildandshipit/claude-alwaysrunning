@@ -17,6 +17,7 @@ const { getAPIKeyManager } = require('./auth');
 const { getSchedulerManager } = require('./scheduler');
 const { getAlertChannels } = require('./alerts');
 const { getMemoryStore } = require('./memory');
+const { getTriggerService } = require('./triggers');
 
 const DEFAULT_PORT = 3377;
 const RESTART_DELAY = 2000;
@@ -59,6 +60,9 @@ class ClaudeService {
     // Memory store for UI access
     this.memoryStore = getMemoryStore();
 
+    // Trigger service for periodic jobs
+    this.triggers = getTriggerService();
+
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
     this.portFile = path.join(this.configDir, 'service.port');
@@ -94,6 +98,9 @@ class ClaudeService {
 
     // Start scheduler for reminders
     this.startScheduler();
+
+    // Setup and start triggers
+    this.setupTriggers();
 
     // Setup signal handlers
     this.setupSignalHandlers();
@@ -573,6 +580,66 @@ class ClaudeService {
           });
         }
         break;
+
+      // Trigger operations
+      case 'triggers:status':
+        this.sendToWs(clientId, {
+          type: 'triggers:status',
+          data: this.triggers.getAllStatus()
+        });
+        break;
+
+      case 'triggers:report':
+        this.sendToWs(clientId, {
+          type: 'triggers:report',
+          data: this.triggers.getReport()
+        });
+        break;
+
+      case 'triggers:run':
+        try {
+          await this.triggers.trigger(msg.name);
+          this.sendToWs(clientId, {
+            type: 'triggers:triggered',
+            data: { name: msg.name, status: this.triggers.getStatus(msg.name) }
+          });
+        } catch (err) {
+          this.sendToWs(clientId, {
+            type: 'error',
+            message: `Failed to run trigger: ${err.message}`
+          });
+        }
+        break;
+
+      case 'triggers:stop':
+        try {
+          this.triggers.stop(msg.name);
+          this.sendToWs(clientId, {
+            type: 'triggers:stopped',
+            data: { name: msg.name }
+          });
+        } catch (err) {
+          this.sendToWs(clientId, {
+            type: 'error',
+            message: `Failed to stop trigger: ${err.message}`
+          });
+        }
+        break;
+
+      case 'triggers:start':
+        try {
+          this.triggers.startJob(msg.name, msg.immediate || false);
+          this.sendToWs(clientId, {
+            type: 'triggers:started',
+            data: { name: msg.name }
+          });
+        } catch (err) {
+          this.sendToWs(clientId, {
+            type: 'error',
+            message: `Failed to start trigger: ${err.message}`
+          });
+        }
+        break;
     }
   }
 
@@ -825,6 +892,104 @@ class ClaudeService {
   }
 
   /**
+   * Setup and start periodic triggers
+   */
+  setupTriggers() {
+    // Register periodic jobs
+
+    // Session auto-save: every 1 hour
+    this.triggers.register('session-save', {
+      interval: 60 * 60 * 1000,  // 1 hour
+      description: 'Auto-save session info to memory',
+      handler: async () => {
+        await this.saveSession();
+      },
+    });
+
+    // Output buffer cleanup: every 30 minutes
+    this.triggers.register('buffer-cleanup', {
+      interval: 30 * 60 * 1000,  // 30 minutes
+      description: 'Clean up old output buffer entries',
+      handler: () => {
+        const before = this.outputBuffer.length;
+        // Keep only last 500 entries
+        if (this.outputBuffer.length > this.maxBufferSize) {
+          this.outputBuffer = this.outputBuffer.slice(-this.maxBufferSize);
+        }
+        const removed = before - this.outputBuffer.length;
+        if (removed > 0) {
+          this.log(`Buffer cleanup: removed ${removed} old entries`);
+        }
+      },
+    });
+
+    // Log rotation check: every 2 hours
+    this.triggers.register('log-check', {
+      interval: 2 * 60 * 60 * 1000,  // 2 hours
+      description: 'Check log file size and rotate if needed',
+      handler: () => {
+        try {
+          const stats = fs.statSync(this.logFile);
+          const sizeMB = stats.size / (1024 * 1024);
+          if (sizeMB > 10) {
+            // Rotate log file if > 10MB
+            const rotatedFile = `${this.logFile}.${Date.now()}.old`;
+            fs.renameSync(this.logFile, rotatedFile);
+            this.log(`Log rotated: ${sizeMB.toFixed(2)}MB -> ${rotatedFile}`);
+          }
+        } catch (e) {
+          // Ignore if file doesn't exist
+        }
+      },
+    });
+
+    // Setup lifecycle event logging
+    this.triggers.on('jobStart', ({ name }) => {
+      this.log(`[Trigger] Starting: ${name}`);
+    });
+
+    this.triggers.on('jobComplete', ({ name, duration, runCount }) => {
+      this.log(`[Trigger] Completed: ${name} (${duration}ms, run #${runCount})`);
+    });
+
+    this.triggers.on('jobError', ({ name, error }) => {
+      this.log(`[Trigger] Error in ${name}: ${error.message}`);
+    });
+
+    // Start all triggers
+    this.triggers.start();
+    this.log(`Triggers started: ${this.triggers.jobs.size} jobs registered`);
+  }
+
+  /**
+   * Save current session info to memory
+   */
+  async saveSession() {
+    try {
+      const sessionInfo = {
+        timestamp: Date.now(),
+        uptime: process.uptime(),
+        memoryUsage: process.memoryUsage(),
+        clientCount: this.clients.size + this.wsClients.size,
+        restartAttempts: this.restartAttempts,
+        outputBufferSize: this.outputBuffer.length,
+      };
+
+      // Store session summary as a fact for persistence
+      const summary = `Session snapshot at ${new Date().toISOString()}: ` +
+        `${sessionInfo.clientCount} clients, ` +
+        `${sessionInfo.outputBufferSize} buffered messages, ` +
+        `uptime ${Math.floor(sessionInfo.uptime / 60)} minutes`;
+
+      this.memoryStore.addFact(summary, 'session');
+      this.log(`Session saved: ${summary}`);
+    } catch (error) {
+      this.log(`Failed to save session: ${error.message}`);
+      throw error;  // Let trigger service track the error
+    }
+  }
+
+  /**
    * Stop the service
    */
   async stop() {
@@ -834,6 +999,12 @@ class ClaudeService {
     // Stop scheduler
     if (this.scheduler) {
       this.scheduler.stop();
+    }
+
+    // Stop triggers
+    if (this.triggers) {
+      this.triggers.stopAll();
+      this.log('Triggers stopped');
     }
 
     // Clear ready check interval
