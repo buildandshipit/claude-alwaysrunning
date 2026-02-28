@@ -13,7 +13,7 @@ const providers = require('./providers');
 const { MemoryStore, getMemoryStore, ContextBuilder, getContextBuilder } = require('./memory');
 const { SchedulerManager, getSchedulerManager, parseTime, parseCronPattern, parseRelativeTime, parseReminderTime, isValidCron } = require('./scheduler');
 const { AlertChannels, getAlertChannels } = require('./alerts');
-const { TriggerService, getTriggerService, resetTriggerService } = require('./triggers');
+const { ScheduleService, getScheduleService, resetScheduleService } = require('./schedule');
 
 module.exports = {
   // Service
@@ -60,8 +60,8 @@ module.exports = {
   AlertChannels,
   getAlertChannels,
 
-  // Triggers
-  TriggerService,
-  getTriggerService,
-  resetTriggerService
+  // Schedule
+  ScheduleService,
+  getScheduleService,
+  resetScheduleService
 };

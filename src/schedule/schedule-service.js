@@ -1,5 +1,5 @@
 /**
- * TriggerService - Generic periodic job scheduler
+ * ScheduleService - Generic periodic job scheduler
  *
  * A hybrid scheduler that manages timing + handlers + metadata.
  * Supports both interval-based and cron-based scheduling.
@@ -12,23 +12,23 @@
  * - Async handler support
  *
  * Usage:
- *   const { getTriggerService } = require('./triggers');
- *   const triggers = getTriggerService();
+ *   const { getScheduleService } = require('./schedule');
+ *   const schedule = getScheduleService();
  *
- *   triggers.register('session-save', {
+ *   schedule.register('session-save', {
  *     interval: 60 * 60 * 1000,  // 1 hour
  *     handler: () => sessionManager.save(),
  *     immediate: true
  *   });
  *
- *   triggers.on('jobComplete', ({ name, duration }) => {
+ *   schedule.on('jobComplete', ({ name, duration }) => {
  *     console.log(`${name} completed in ${duration}ms`);
  *   });
  */
 
 const EventEmitter = require('events');
 
-class TriggerService extends EventEmitter {
+class ScheduleService extends EventEmitter {
   constructor() {
     super();
     this.jobs = new Map();
@@ -44,7 +44,7 @@ class TriggerService extends EventEmitter {
    * @param {boolean} [options.immediate=false] - Run immediately on register
    * @param {boolean} [options.enabled=true] - Start enabled
    * @param {string} [options.description] - Human-readable description
-   * @returns {TriggerService} - Returns this for chaining
+   * @returns {ScheduleService} - Returns this for chaining
    */
   register(name, { interval, handler, immediate = false, enabled = true, description = '' }) {
     if (this.jobs.has(name)) {
@@ -84,7 +84,7 @@ class TriggerService extends EventEmitter {
   }
 
   /**
-   * Start the trigger service (enables all registered jobs)
+   * Start the schedule service (enables all registered jobs)
    */
   start() {
     if (this.started) return;
@@ -253,10 +253,10 @@ class TriggerService extends EventEmitter {
   }
 
   /**
-   * Trigger a job immediately (outside of schedule)
+   * Run a job immediately (outside of schedule)
    * @param {string} name - Job name
    */
-  async trigger(name) {
+  async run(name) {
     const job = this.jobs.get(name);
     if (!job) {
       throw new Error(`Job "${name}" not found`);
@@ -391,12 +391,12 @@ class TriggerService extends EventEmitter {
 let instance = null;
 
 /**
- * Get the singleton TriggerService instance
- * @returns {TriggerService}
+ * Get the singleton ScheduleService instance
+ * @returns {ScheduleService}
  */
-function getTriggerService() {
+function getScheduleService() {
   if (!instance) {
-    instance = new TriggerService();
+    instance = new ScheduleService();
   }
   return instance;
 }
@@ -404,7 +404,7 @@ function getTriggerService() {
 /**
  * Reset the singleton (mainly for testing)
  */
-function resetTriggerService() {
+function resetScheduleService() {
   if (instance) {
     instance.shutdown();
     instance = null;
@@ -412,7 +412,7 @@ function resetTriggerService() {
 }
 
 module.exports = {
-  TriggerService,
-  getTriggerService,
-  resetTriggerService,
+  ScheduleService,
+  getScheduleService,
+  resetScheduleService,
 };

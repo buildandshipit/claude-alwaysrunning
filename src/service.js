@@ -17,7 +17,7 @@ const { getAPIKeyManager } = require('./auth');
 const { getSchedulerManager } = require('./scheduler');
 const { getAlertChannels } = require('./alerts');
 const { getMemoryStore } = require('./memory');
-const { getTriggerService } = require('./triggers');
+const { getScheduleService } = require('./schedule');
 
 const DEFAULT_PORT = 3377;
 const RESTART_DELAY = 2000;
@@ -60,8 +60,8 @@ class ClaudeService {
     // Memory store for UI access
     this.memoryStore = getMemoryStore();
 
-    // Trigger service for periodic jobs
-    this.triggers = getTriggerService();
+    // Schedule service for periodic jobs
+    this.schedule = getScheduleService();
 
     // Files
     this.pidFile = path.join(this.configDir, 'service.pid');
@@ -99,8 +99,8 @@ class ClaudeService {
     // Start scheduler for reminders
     this.startScheduler();
 
-    // Setup and start triggers
-    this.setupTriggers();
+    // Setup and start scheduled jobs
+    this.setupSchedule();
 
     // Setup signal handlers
     this.setupSignalHandlers();
@@ -582,61 +582,61 @@ class ClaudeService {
         break;
 
       // Trigger operations
-      case 'triggers:status':
+      case 'schedule:status':
         this.sendToWs(clientId, {
-          type: 'triggers:status',
-          data: this.triggers.getAllStatus()
+          type: 'schedule:status',
+          data: this.schedule.getAllStatus()
         });
         break;
 
-      case 'triggers:report':
+      case 'schedule:report':
         this.sendToWs(clientId, {
-          type: 'triggers:report',
-          data: this.triggers.getReport()
+          type: 'schedule:report',
+          data: this.schedule.getReport()
         });
         break;
 
-      case 'triggers:run':
+      case 'schedule:run':
         try {
-          await this.triggers.trigger(msg.name);
+          await this.schedule.run(msg.name);
           this.sendToWs(clientId, {
-            type: 'triggers:triggered',
-            data: { name: msg.name, status: this.triggers.getStatus(msg.name) }
+            type: 'schedule:ran',
+            data: { name: msg.name, status: this.schedule.getStatus(msg.name) }
           });
         } catch (err) {
           this.sendToWs(clientId, {
             type: 'error',
-            message: `Failed to run trigger: ${err.message}`
+            message: `Failed to run scheduled job: ${err.message}`
           });
         }
         break;
 
-      case 'triggers:stop':
+      case 'schedule:stop':
         try {
-          this.triggers.stop(msg.name);
+          this.schedule.stop(msg.name);
           this.sendToWs(clientId, {
-            type: 'triggers:stopped',
+            type: 'schedule:stopped',
             data: { name: msg.name }
           });
         } catch (err) {
           this.sendToWs(clientId, {
             type: 'error',
-            message: `Failed to stop trigger: ${err.message}`
+            message: `Failed to stop scheduled job: ${err.message}`
           });
         }
         break;
 
-      case 'triggers:start':
+      case 'schedule:start':
         try {
-          this.triggers.startJob(msg.name, msg.immediate || false);
+          this.schedule.startJob(msg.name, msg.immediate || false);
           this.sendToWs(clientId, {
-            type: 'triggers:started',
+            type: 'schedule:started',
             data: { name: msg.name }
           });
         } catch (err) {
           this.sendToWs(clientId, {
             type: 'error',
-            message: `Failed to start trigger: ${err.message}`
+            message: `Failed to start scheduled job: ${err.message}`
           });
         }
         break;
@@ -892,13 +892,13 @@ class ClaudeService {
   }
 
   /**
-   * Setup and start periodic triggers
+   * Setup and start scheduled jobs
    */
-  setupTriggers() {
-    // Register periodic jobs
+  setupSchedule() {
+    // Register scheduled jobs
 
     // Session auto-save: every 1 hour
-    this.triggers.register('session-save', {
+    this.schedule.register('session-save', {
       interval: 60 * 60 * 1000,  // 1 hour
       description: 'Auto-save session info to memory',
       handler: async () => {
@@ -907,7 +907,7 @@ class ClaudeService {
     });
 
     // Output buffer cleanup: every 30 minutes
-    this.triggers.register('buffer-cleanup', {
+    this.schedule.register('buffer-cleanup', {
       interval: 30 * 60 * 1000,  // 30 minutes
       description: 'Clean up old output buffer entries',
       handler: () => {
@@ -924,7 +924,7 @@ class ClaudeService {
     });
 
     // Log rotation check: every 2 hours
-    this.triggers.register('log-check', {
+    this.schedule.register('log-check', {
       interval: 2 * 60 * 60 * 1000,  // 2 hours
       description: 'Check log file size and rotate if needed',
       handler: () => {
@@ -944,21 +944,21 @@ class ClaudeService {
     });
 
     // Setup lifecycle event logging
-    this.triggers.on('jobStart', ({ name }) => {
-      this.log(`[Trigger] Starting: ${name}`);
+    this.schedule.on('jobStart', ({ name }) => {
+      this.log(`[Schedule] Starting: ${name}`);
     });
 
-    this.triggers.on('jobComplete', ({ name, duration, runCount }) => {
-      this.log(`[Trigger] Completed: ${name} (${duration}ms, run #${runCount})`);
+    this.schedule.on('jobComplete', ({ name, duration, runCount }) => {
+      this.log(`[Schedule] Completed: ${name} (${duration}ms, run #${runCount})`);
     });
 
-    this.triggers.on('jobError', ({ name, error }) => {
-      this.log(`[Trigger] Error in ${name}: ${error.message}`);
+    this.schedule.on('jobError', ({ name, error }) => {
+      this.log(`[Schedule] Error in ${name}: ${error.message}`);
     });
 
-    // Start all triggers
-    this.triggers.start();
-    this.log(`Triggers started: ${this.triggers.jobs.size} jobs registered`);
+    // Start all scheduled jobs
+    this.schedule.start();
+    this.log(`Schedule started: ${this.schedule.jobs.size} jobs registered`);
   }
 
   /**
@@ -1001,10 +1001,10 @@ class ClaudeService {
       this.scheduler.stop();
     }
 
-    // Stop triggers
-    if (this.triggers) {
-      this.triggers.stopAll();
-      this.log('Triggers stopped');
+    // Stop scheduled jobs
+    if (this.schedule) {
+      this.schedule.stopAll();
+      this.log('Schedule stopped');
     }
 
     // Clear ready check interval

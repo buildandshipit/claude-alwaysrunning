@@ -1,25 +1,25 @@
 ---
-name: triggers
-description: Manage periodic trigger jobs (status, run, stop, start)
+name: schedule
+description: Manage scheduled jobs (status, run, stop, start)
 disable-model-invocation: true
 allowed-tools: Bash, Read
 argument-hint: "[status|report|run|stop|start] [job-name]"
 ---
 
-# Trigger Management
+# Schedule Management
 
-Manage periodic jobs in the claude-alwaysrunning TriggerService.
+Manage periodic jobs in the claude-alwaysrunning ScheduleService.
 
 ## Arguments
 
-- No args or `status`: Show all trigger statuses
+- No args or `status`: Show all job statuses
 - `report`: Show detailed report with summary stats
-- `run <name>`: Manually execute a trigger immediately
-- `stop <name>`: Stop a running trigger
-- `start <name>`: Start a stopped trigger
-- `list`: List all registered triggers
+- `run <name>`: Manually execute a job immediately
+- `stop <name>`: Stop a running job
+- `start <name>`: Start a stopped job
+- `list`: List all registered jobs
 
-## Available Triggers
+## Available Jobs
 
 | Name | Interval | Description |
 |------|----------|-------------|
@@ -31,14 +31,14 @@ Manage periodic jobs in the claude-alwaysrunning TriggerService.
 
 ### View Status (default)
 
-Show current status of all triggers:
+Show current status of all scheduled jobs:
 
 ```bash
 # Connect to WebSocket and query status
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:3378');
-ws.on('open', () => ws.send(JSON.stringify({ type: 'triggers:status' })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'schedule:status' })));
 ws.on('message', (data) => { console.log(JSON.parse(data).data); ws.close(); });
 "
 ```
@@ -51,7 +51,7 @@ Show summary with stats:
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:3378');
-ws.on('open', () => ws.send(JSON.stringify({ type: 'triggers:report' })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'schedule:report' })));
 ws.on('message', (data) => {
   const report = JSON.parse(data).data;
   console.log('=== Summary ===');
@@ -68,42 +68,42 @@ ws.on('message', (data) => {
 "
 ```
 
-### Run Trigger Manually
+### Run Job Manually
 
-Execute a trigger immediately (outside of schedule):
+Execute a job immediately (outside of schedule):
 
 ```bash
 # Replace JOB_NAME with: session-save, buffer-cleanup, or log-check
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:3378');
-ws.on('open', () => ws.send(JSON.stringify({ type: 'triggers:run', name: 'JOB_NAME' })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'schedule:run', name: 'JOB_NAME' })));
 ws.on('message', (data) => { console.log(JSON.parse(data)); ws.close(); });
 "
 ```
 
-### Stop a Trigger
+### Stop a Job
 
-Stop a trigger from running:
+Stop a job from running:
 
 ```bash
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:3378');
-ws.on('open', () => ws.send(JSON.stringify({ type: 'triggers:stop', name: 'JOB_NAME' })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'schedule:stop', name: 'JOB_NAME' })));
 ws.on('message', (data) => { console.log(JSON.parse(data)); ws.close(); });
 "
 ```
 
-### Start a Trigger
+### Start a Job
 
-Start a previously stopped trigger:
+Start a previously stopped job:
 
 ```bash
 node -e "
 const WebSocket = require('ws');
 const ws = new WebSocket('ws://localhost:3378');
-ws.on('open', () => ws.send(JSON.stringify({ type: 'triggers:start', name: 'JOB_NAME', immediate: false })));
+ws.on('open', () => ws.send(JSON.stringify({ type: 'schedule:start', name: 'JOB_NAME', immediate: false })));
 ws.on('message', (data) => { console.log(JSON.parse(data)); ws.close(); });
 "
 ```
@@ -112,9 +112,9 @@ ws.on('message', (data) => { console.log(JSON.parse(data)); ws.close(); });
 
 Based on the argument provided:
 
-1. **No args / `status` / `list`**: Run the status command to show all triggers
+1. **No args / `status` / `list`**: Run the status command to show all jobs
 2. **`report`**: Run the report command for detailed stats
-3. **`run <name>`**: Replace JOB_NAME with the provided name and run the trigger
+3. **`run <name>`**: Replace JOB_NAME with the provided name and run the job
 4. **`stop <name>`**: Replace JOB_NAME with the provided name and stop it
 5. **`start <name>`**: Replace JOB_NAME with the provided name and start it
 
@@ -135,19 +135,19 @@ claude-always status
 For direct Node.js usage:
 
 ```javascript
-const { getTriggerService } = require('claude-alwaysrunning');
-const triggers = getTriggerService();
+const { getScheduleService } = require('claude-alwaysrunning');
+const schedule = getScheduleService();
 
 // Get status
-console.log(triggers.getAllStatus());
+console.log(schedule.getAllStatus());
 
 // Get report
-console.log(triggers.getReport());
+console.log(schedule.getReport());
 
 // Run manually
-await triggers.trigger('session-save');
+await schedule.run('session-save');
 
 // Stop/start
-triggers.stop('session-save');
-triggers.startJob('session-save');
+schedule.stop('session-save');
+schedule.startJob('session-save');
 ```
