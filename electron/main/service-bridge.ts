@@ -126,6 +126,11 @@ export class ServiceBridge extends EventEmitter {
           this.emit('output', msg.data);
           break;
 
+        case 'message':
+          // Structured message from stream-json output
+          this.emit('message', msg);
+          break;
+
         case 'ready':
           this.emit('ready', msg.ready);
           break;

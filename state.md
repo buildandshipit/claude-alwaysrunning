@@ -5,9 +5,15 @@
 
 ## Git Status
 - **Branch:** main
-- **Modified:** src/service.js (uncommitted changes)
+- **Status:** Clean
 
 ## Recent Changes (newest first)
+
+### 2026-03-14 - Context optimization + service fixes
+- Added architecture.md and state.md for faster Claude context loading
+- Removed `--dangerously-skip-permissions` flag from service startup
+- Removed auto-accept permissions dialog logic
+- Fixed async/await syntax error in `handleWsMessage`
 
 ### 2026-02-28 - ScheduleService
 - Renamed TriggerService to ScheduleService
@@ -28,7 +34,7 @@
 - Loop prevention via message ID tracking
 
 ## Current Work
-- src/service.js has uncommitted modifications
+None - all changes committed.
 
 ## Known Issues
 None documented.

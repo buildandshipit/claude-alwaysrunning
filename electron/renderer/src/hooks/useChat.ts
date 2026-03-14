@@ -7,20 +7,12 @@ interface Message {
   timestamp: Date;
 }
 
-// Strip ANSI escape codes from terminal output
-function stripAnsi(str: string): string {
-  // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|\][^\x1B]*\x1B\\)/g, '');
-}
-
-// Clean terminal output for display
-function cleanOutput(str: string): string {
-  let cleaned = stripAnsi(str);
-  // Remove common terminal control sequences
-  cleaned = cleaned.replace(/\]\d;[^\x07\x1B]*(?:\x07|\x1B\\)/g, ''); // OSC sequences
-  cleaned = cleaned.replace(/\[[\?0-9;]*[a-zA-Z]/g, ''); // CSI sequences
-  cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // Control chars except \n \r \t
-  return cleaned;
+interface ClaudeMessage {
+  type: 'message';
+  messageType: string;
+  content?: string;
+  isComplete?: boolean;
+  data: any;
 }
 
 export function useChat() {
@@ -31,19 +23,44 @@ export function useChat() {
   const idCounter = useRef(0);
 
   useEffect(() => {
-    // Listen for Claude output
+    // Listen for structured Claude messages (stream-json format)
+    const unsubMessage = window.electronAPI.onClaudeMessage((msg: ClaudeMessage) => {
+      // Only process messages with content
+      if (msg.content) {
+        outputRef.current = msg.content;
+        setCurrentOutput(msg.content);
+        setIsStreaming(true);
+      }
+
+      // If message is complete, finalize it
+      if (msg.isComplete && msg.content) {
+        const assistantMessage: Message = {
+          id: `msg-${++idCounter.current}`,
+          role: 'assistant',
+          content: msg.content,
+          timestamp: new Date()
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        outputRef.current = '';
+        setCurrentOutput('');
+        setIsStreaming(false);
+      }
+    });
+
+    // Fallback: Listen for raw output (for non-JSON messages)
     const unsubOutput = window.electronAPI.onClaudeOutput((data: string) => {
-      // Accumulate streaming output, clean ANSI codes
-      outputRef.current += cleanOutput(data);
-      setCurrentOutput(outputRef.current);
-      setIsStreaming(true);
+      // Only use if we're not getting structured messages
+      if (!outputRef.current) {
+        outputRef.current += data;
+        setCurrentOutput(outputRef.current);
+        setIsStreaming(true);
+      }
     });
 
     // Listen for history
     const unsubHistory = window.electronAPI.onHistory((data: string) => {
-      // Parse history into messages (simplified - just show as terminal output)
       if (data.trim()) {
-        setCurrentOutput(cleanOutput(data));
+        setCurrentOutput(data);
       }
     });
 
@@ -51,6 +68,7 @@ export function useChat() {
     window.electronAPI.requestHistory(50);
 
     return () => {
+      unsubMessage();
       unsubOutput();
       unsubHistory();
     };

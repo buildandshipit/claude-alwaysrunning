@@ -42,6 +42,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('claude:output', handler);
   },
 
+  onClaudeMessage: (callback: (msg: any) => void) => {
+    const handler = (_: any, msg: any) => callback(msg);
+    ipcRenderer.on('claude:message', handler);
+    return () => ipcRenderer.removeListener('claude:message', handler);
+  },
+
   onClaudeStatus: (callback: (status: any) => void) => {
     const handler = (_: any, status: any) => callback(status);
     ipcRenderer.on('claude:status', handler);
@@ -166,6 +172,7 @@ declare global {
       cancelReminder: (id: number) => void;
       requestLogs: (lines?: number) => void;
       onClaudeOutput: (callback: (data: string) => void) => () => void;
+      onClaudeMessage: (callback: (msg: any) => void) => () => void;
       onClaudeStatus: (callback: (status: any) => void) => () => void;
       onClaudeReady: (callback: (ready: boolean) => void) => () => void;
       onServiceConnected: (callback: () => void) => () => void;

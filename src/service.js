@@ -39,6 +39,7 @@ class ClaudeService {
     this.clientIdCounter = 0;
     this.outputBuffer = [];
     this.maxBufferSize = 500;
+    this.jsonLineBuffer = ''; // Buffer for incomplete JSON lines
     this.restartAttempts = 0;
     this.lastRestartTime = 0;
     this.isShuttingDown = false;
@@ -116,7 +117,7 @@ class ClaudeService {
       try {
         const isWindows = os.platform() === 'win32';
         const shell = isWindows ? 'cmd.exe' : process.env.SHELL || '/bin/bash';
-        const claudeCmd = 'claude';
+        const claudeCmd = 'claude --output-format stream-json';
         const shellArgs = isWindows ? ['/c', claudeCmd] : ['-c', claudeCmd];
 
         this.log('Starting Claude process...');
@@ -230,23 +231,72 @@ class ClaudeService {
   }
 
   /**
-   * Handle output from Claude
+   * Handle output from Claude (stream-json format)
    */
   handleOutput(data) {
     // Track last output time for ready detection
     this.lastOutputTime = Date.now();
 
-    // Buffer output
+    // Buffer raw output for history/logs
     this.outputBuffer.push({ time: Date.now(), data });
     while (this.outputBuffer.length > this.maxBufferSize) {
       this.outputBuffer.shift();
     }
 
-    // Broadcast to TCP clients
-    this.broadcast({ type: 'output', data });
+    // Parse JSON lines
+    this.jsonLineBuffer += data;
+    const lines = this.jsonLineBuffer.split('\n');
+
+    // Keep the last incomplete line in buffer
+    this.jsonLineBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      try {
+        const msg = JSON.parse(trimmed);
+        this.handleJsonMessage(msg);
+      } catch (e) {
+        // Not valid JSON, send as raw text (fallback)
+        this.broadcast({ type: 'output', data: trimmed });
+        this.broadcastWs({ type: 'output', data: trimmed });
+      }
+    }
+  }
+
+  /**
+   * Handle parsed JSON message from Claude
+   */
+  handleJsonMessage(msg) {
+    // Extract content based on message type
+    // Common types: assistant, tool_use, tool_result, result, system
+    const structured = {
+      type: 'message',
+      messageType: msg.type,
+      data: msg
+    };
+
+    // For assistant messages, extract the text content
+    if (msg.type === 'assistant' && msg.message?.content) {
+      const textContent = msg.message.content
+        .filter(c => c.type === 'text')
+        .map(c => c.text)
+        .join('');
+      structured.content = textContent;
+    }
+
+    // For result messages (final response)
+    if (msg.type === 'result' && msg.result) {
+      structured.content = msg.result;
+      structured.isComplete = true;
+    }
+
+    // Broadcast structured message to TCP clients
+    this.broadcast(structured);
 
     // Broadcast to WebSocket clients
-    this.broadcastWs({ type: 'output', data });
+    this.broadcastWs(structured);
   }
 
   /**

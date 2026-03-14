@@ -35,6 +35,13 @@ async function initialize() {
     }
   });
 
+  serviceBridge.on('message', (msg: any) => {
+    const mainWin = getMainWindow();
+    if (mainWin) {
+      mainWin.webContents.send('claude:message', msg);
+    }
+  });
+
   serviceBridge.on('status', (status: any) => {
     const mainWin = getMainWindow();
     if (mainWin) {
