@@ -409,7 +409,7 @@ class ClaudeService {
   /**
    * Handle WebSocket message
    */
-  handleWsMessage(clientId, msg) {
+  async handleWsMessage(clientId, msg) {
     switch (msg.type) {
       case 'input':
         if (this.ptyProcess) {
