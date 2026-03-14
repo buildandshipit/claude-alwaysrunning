@@ -48,7 +48,6 @@ class ClaudeService {
     this.lastOutputTime = 0;
     this.commandQueue = [];
     this.readyCheckInterval = null;
-    this.permissionsAccepted = false;
 
     // Authentication
     this.apiKeyManager = this.remoteMode ? getAPIKeyManager() : null;
@@ -117,8 +116,7 @@ class ClaudeService {
       try {
         const isWindows = os.platform() === 'win32';
         const shell = isWindows ? 'cmd.exe' : process.env.SHELL || '/bin/bash';
-        // Use --dangerously-skip-permissions to avoid the confirmation dialog in daemon mode
-        const claudeCmd = 'claude --dangerously-skip-permissions';
+        const claudeCmd = 'claude';
         const shellArgs = isWindows ? ['/c', claudeCmd] : ['-c', claudeCmd];
 
         this.log('Starting Claude process...');
@@ -126,7 +124,6 @@ class ClaudeService {
         // Reset ready state
         this.claudeReady = false;
         this.lastOutputTime = Date.now();
-        this.permissionsAccepted = false;
         this.startReadyCheck();
 
         this.ptyProcess = pty.spawn(shell, shellArgs, {
@@ -238,25 +235,6 @@ class ClaudeService {
   handleOutput(data) {
     // Track last output time for ready detection
     this.lastOutputTime = Date.now();
-
-    // Auto-accept permissions dialog if detected
-    // Look for "Yes, I accept" which indicates the bypass permissions warning
-    if (!this.permissionsAccepted && data.includes('Yes, I accept')) {
-      this.log('Detected permissions dialog, auto-accepting...');
-      this.permissionsAccepted = true;
-      // Send "2" to select option 2, then Enter to confirm
-      setTimeout(() => {
-        if (this.ptyProcess && !this.isShuttingDown) {
-          this.ptyProcess.write('2');
-          setTimeout(() => {
-            if (this.ptyProcess && !this.isShuttingDown) {
-              this.ptyProcess.write('\r');
-              this.log('Sent auto-accept sequence for permissions dialog');
-            }
-          }, 100);
-        }
-      }, 100);
-    }
 
     // Buffer output
     this.outputBuffer.push({ time: Date.now(), data });
